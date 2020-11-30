@@ -1,3 +1,3 @@
 # echo
 
-A C dev learn Rust here:-)
+C dev learn Rust here:-)
