@@ -13,6 +13,8 @@ use frame::{Response};
 mod error;
 use error::ServerError;
 
+use std::sync::Arc;
+
 struct Server {
 }
 
@@ -22,11 +24,10 @@ impl Server {
         Server{}
     }
 
-    async fn read_header(&self, socket: &mut tokio::net::TcpStream) -> Result<RequestHeader, ServerError> {
-        let mut header_bytes = [0; std::mem::size_of::<RequestHeader>()];
+    async fn read(&self, socket: &mut tokio::net::TcpStream, buf: &mut [u8]) -> Result<(), ServerError> {
         let mut read = 0;
-        while read < header_bytes.len() {
-            let n  = match socket.read(&mut header_bytes[read..]).await {
+        while read < buf.len() {
+            let n  = match socket.read(&mut buf[read..]).await {
                 Ok(n) => n,
                 Err(e) => {
                     println!("socker read error {}", e);
@@ -39,6 +40,29 @@ impl Server {
             }
             read += n;
         }
+        Ok(())
+    }
+
+    async fn write(&self, socket: &mut tokio::net::TcpStream, buf: &[u8]) -> Result<(), ServerError> {
+        let mut written = 0;
+        while written < buf.len() {
+            let n  = match socket.write(&buf[written..]).await {
+                Ok(n) => n,
+                Err(e) => {
+                    println!("socker write error {}", e);
+                    return Err(ServerError::new())
+                }
+            };
+
+            written += n;
+        }
+        Ok(())
+    }
+
+    async fn read_header(&self, socket: &mut tokio::net::TcpStream) -> Result<RequestHeader, ServerError> {
+        let mut header_bytes = [0; std::mem::size_of::<RequestHeader>()];
+
+        self.read(socket, &mut header_bytes).await?;
 
         let mut header = RequestHeader::new();
         match header.from_bytes(&header_bytes) {
@@ -54,39 +78,15 @@ impl Server {
 
     async fn read_body(&self, size: usize, socket: &mut tokio::net::TcpStream) -> Result<Vec<u8>, ServerError> {
         let mut body = vec![0; size as usize];
-        let mut read = 0;
-        while read < size as usize {
-            let n = match socket.read(&mut body[read..]).await {
-                    Ok(n) => n,
-                    Err(e) => {
-                        println!("socker read error {}", e);
-                        return Err(ServerError::new())    
-                    }
-                };
 
-            if n == 0 {
-                return Err(ServerError::new())
-            }
-            read += n;
-        }
+        self.read(socket, &mut body).await?;
         return Ok(body)
     }
 
     async fn read_request(&self, socket: &mut tokio::net::TcpStream) -> Result<Request, ServerError> {
+        let header: RequestHeader = self.read_header(socket).await?;
 
-        let header: RequestHeader = match self.read_header(socket).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(e)
-            }
-        };
-
-        let body: Vec<u8> = match self.read_body(header.size as usize, socket).await {
-            Ok(v) => v,
-            Err(e) => {
-                return Err(e)
-            }
-        };
+        let body: Vec<u8> = self.read_body(header.size as usize, socket).await?;
 
         return Ok(Request{header: header, body: body})
     }
@@ -97,35 +97,13 @@ impl Server {
     }
 
     async fn write_response(&self, socket: &mut tokio::net::TcpStream, resp: &Response) -> Result<(), ServerError> {
-        let mut written = 0;
 
-        let header_bytes = match resp.header.to_bytes() {
-            Ok(v) => v,
-            Err(e) => return Err(e)
-        };
+        let header_bytes = resp.header.to_bytes()?;
 
-        while written < header_bytes.len() {
-            let n = match socket.write(&header_bytes[written..]).await {
-                Ok(n) => n,
-                Err(e) => {
-                    println!("socket write error {}", e);
-                    return Err(ServerError::new())
-                }
-            };
-            written += n;
-        }
+        self.write(socket, &header_bytes).await?;
 
-        written = 0;
-        while written < resp.body.len() {
-            let n = match socket.write(&resp.body[written..]).await {
-                Ok(n) => n,
-                Err(e) => {
-                    println!("socket write error {}", e);
-                    return Err(ServerError::new())
-                }
-            };
-            written += n;
-        }
+        self.write(socket, &resp.body).await?;
+
         Ok(())
     }
 
@@ -158,8 +136,6 @@ impl Server {
     }
 
 }
-
-use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
