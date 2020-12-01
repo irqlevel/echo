@@ -90,12 +90,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "common_lib"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "byteorder",
+ "bytes 0.6.0",
+ "futures",
+ "http",
+ "httparse",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "time",
+ "tokio",
+ "tokio-util",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "echo"
 version = "0.1.0"
 dependencies = [
  "bincode",
  "byteorder",
  "bytes 0.6.0",
+ "common_lib",
  "futures",
  "http",
  "httparse",
@@ -632,9 +653,9 @@ dependencies = [
 
 [[package]]
 name = "syn"
-version = "1.0.52"
+version = "1.0.53"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6c1e438504729046a5cfae47f97c30d6d083c7d91d94603efdae3477fc070d4c"
+checksum = "8833e20724c24de12bbaba5ad230ea61c3eafb05b881c7c9d3cfe8638b187e68"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -663,9 +684,9 @@ dependencies = [
 
 [[package]]
 name = "tokio"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "9dfe2523e6fa84ddf5e688151d4e5fddc51678de9752c6512a24714c23818d61"
+checksum = "a12a3eb39ee2c231be64487f1fcbe726c8f2514876a55480a5ab8559fc374252"
 dependencies = [
  "autocfg",
  "bytes 0.6.0",

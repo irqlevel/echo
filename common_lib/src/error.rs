@@ -1,3 +1,5 @@
+pub mod error {
+
 use std::fmt;
 
 pub struct ServerError {
@@ -32,4 +34,5 @@ impl fmt::Debug for ServerError {
             self.code, self.message
         )
     }
+}
 }
