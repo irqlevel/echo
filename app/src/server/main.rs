@@ -1,6 +1,5 @@
 
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 use std::env;
@@ -9,7 +8,7 @@ use std::error::Error;
 extern crate common_lib;
 
 use common_lib::error::error::ServerError;
-use common_lib::frame::frame::{RequestHeader, ResponseHeader, Request, Response};
+use common_lib::frame::frame::{RequestHeader, Request, Response};
 
 use common_lib::socket::socket::write as socket_write;
 use common_lib::socket::socket::read as socket_read;
@@ -33,6 +32,7 @@ impl Server {
         let mut header = RequestHeader::new();
         header.from_bytes(&header_bytes)?;
 
+        //println!("header {:?}", header);
         Ok(header)
     }
 
@@ -52,7 +52,9 @@ impl Server {
     }
 
     async fn handle_req(&self, req: &Request, resp: &mut Response) -> Result<(), ServerError> {
-        //TODO
+        //println!("req len {} {}", req.body.len(), req.header.size);
+        resp.body.resize(req.body.len(), 0);
+        resp.body.copy_from_slice(&req.body);
         return Ok(())
     }
 
@@ -72,7 +74,8 @@ impl Server {
 
         let mut resp = Response::new();
         self.handle_req(&req, &mut resp).await?;
-
+        //println!("resp size {}", resp.body.len());
+        resp.header.size = resp.body.len() as u32;
         self.write_response(socket, &resp).await?;
 
         Ok(())
@@ -107,7 +110,12 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
         let server_ref = server.clone();
         tokio::spawn(async move {
-            server_ref.handle_connection(&mut socket).await;
+            match server_ref.handle_connection(&mut socket).await {
+                Ok(()) => {},
+                Err(e) => {
+                    println!("handle_connection error {}", e);
+                }
+            }
         });
     }
 }

@@ -180,7 +180,7 @@ impl RequestHeader {
                 return Err(ServerError::new())
             }
         };
-
+        //println!("size {}", self.size);
         self.padding = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
