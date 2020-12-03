@@ -2,6 +2,7 @@ use tokio::io::{AsyncWriteExt};
 
 use std::env;
 use std::error::Error;
+use log::{error, info, LevelFilter};
 
 extern crate common_lib;
 
@@ -11,6 +12,7 @@ use common_lib::socket::socket::write as socket_write;
 use common_lib::socket::socket::read as socket_read;
 use common_lib::error::error::ServerError;
 
+use common_lib::logger::logger::SimpleLogger;
 
 struct Client {
     socket: Option<tokio::net::TcpStream>
@@ -21,7 +23,6 @@ impl Client {
         req.header.size = req.body.len() as u32;
         let req_header_bytes = req.header.to_bytes()?;
 
-        //println!("header {:?}", req_header_bytes);
         match self.socket.as_mut() {
             Some(e) => {
                 socket_write(e, &req_header_bytes).await?;
@@ -68,6 +69,33 @@ impl Client {
         Ok(resp)
     }
 
+    async fn send2<T: ?Sized, V: ?Sized>(&mut self, request: &T) -> Result<V, ServerError>
+    where
+        T: serde::Serialize,
+        V: serde::de::DeserializeOwned
+    {
+        let mut req = Request::new();
+        req.body = match bincode::serialize(request) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("serialize error {}", e);
+                return Err(ServerError::new())
+            }
+        };
+
+        let resp = self.send(&mut req).await?;
+    
+        let decoded: V = match bincode::deserialize(&resp.body[..]) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("deserialize error {}", e);
+                return Err(ServerError::new())
+            }
+        };
+
+        Ok(decoded)
+    }
+
     fn new() -> Client {
         Client{socket: None}
     }
@@ -75,10 +103,9 @@ impl Client {
     async fn connect(&mut self, addr: &str) -> Result<(), ServerError> {
         let socket = match tokio::net::TcpStream::connect(addr).await {
             Ok(v) => {
-                //println!("connected");
                 v},
             Err(e) => {
-                println!("connect error {}", e);
+                error!("connect error {}", e);
                 return Err(ServerError::new());
             }
         };
@@ -87,61 +114,86 @@ impl Client {
         Ok(())
     }
 
-    async fn close(&mut self) {
+    async fn close(&mut self) -> Result<(), ServerError> {
 
         match self.socket.as_mut() {
             Some(e) => {
-                e.shutdown().await;
+                match e.shutdown().await {
+                    Ok(()) => Ok(()),
+                    Err(e) => {
+                        error!("socket shutdown error{}", e);
+                        return Err(ServerError::new());
+                    }
+                }
             }
             None => {
+                Ok(())
             }
         }
     }
 }
 
+use serde::{Serialize, Deserialize};
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct Entity {
+    x: f32,
+    y: f32,
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+struct World(Vec<Entity>);
+
+async fn test_client() -> Result<(), ServerError> {
+    let addr = env::args()
+    .nth(1)
+    .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+
+    let mut client = Client::new();
+    
+    client.connect(&addr).await?;
+
+    let world = World(vec![Entity { x: 0.0, y: 4.0 }, Entity { x: 10.0, y: 20.5 }]);
+
+    let decoded: World = client.send2(&world).await?;
+
+    assert_eq!(world, decoded);
+
+    client.close().await?;
+
+    Ok(())
+}
+
+static LOGGER: SimpleLogger = SimpleLogger;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    match log::set_logger(&LOGGER)
+        .map(|()| log::set_max_level(LevelFilter::Info)) {
+        Ok(()) => {},
+        Err(e) => {
+            println!("set_logger error {}", e);
+            return Err("set_logger error".into())
+        }
+    }
+
+    info!("starting");
+
     let mut handles = vec![];
     for _ in 0..1000000 {
         handles.push(
         tokio::spawn(async move {
-            let addr = env::args()
-            .nth(1)
-            .unwrap_or_else(|| "127.0.0.1:8080".to_string());
-
-            let mut client = Client::new();
-            
-            match client.connect(&addr).await {
-                Ok(v) => {
-                    //println!("success");
-                    v},
+            match test_client().await {
+                Ok(()) => {},
                 Err(e) => {
-                    println!("connect error {}", e);
-                    return Err(e)
+                    error!("test_client error {}", e);
                 }
             }
-
-            let mut req = Request::new();
-            let message = String::from("Hello!!! Hahahsa");
-            req.body = message.clone().into_bytes();
-
-            let resp = match client.send(&mut req).await {
-                Ok(v) => {
-                    //println!("success");
-                    v},
-                Err(e) => {
-                    println!("send error {}", e);
-                    return Err(e)
-                }
-            };
-            let output = String::from_utf8_lossy(&resp.body);
-            if message != output {
-                println!("invalid output");
-            }
-
-            Ok(())
         }));
     }
     futures::future::join_all(handles).await;
+    info!("completed");
+
     Ok(())
 }

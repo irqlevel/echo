@@ -14,13 +14,15 @@ use common_lib::socket::socket::write as socket_write;
 use common_lib::socket::socket::read as socket_read;
 
 use std::sync::Arc;
+use log::{error, info, LevelFilter};
 
-struct Server {
-}
+use common_lib::logger::logger::SimpleLogger;
+
+struct Server;
 
 impl Server {
 
-    fn new() -> Server {
+    fn new() -> Self {
         Server{}
     }
 
@@ -32,7 +34,6 @@ impl Server {
         let mut header = RequestHeader::new();
         header.from_bytes(&header_bytes)?;
 
-        //println!("header {:?}", header);
         Ok(header)
     }
 
@@ -52,7 +53,6 @@ impl Server {
     }
 
     async fn handle_req(&self, req: &Request, resp: &mut Response) -> Result<(), ServerError> {
-        //println!("req len {} {}", req.body.len(), req.header.size);
         resp.body.resize(req.body.len(), 0);
         resp.body.copy_from_slice(&req.body);
         return Ok(())
@@ -74,7 +74,6 @@ impl Server {
 
         let mut resp = Response::new();
         self.handle_req(&req, &mut resp).await?;
-        //println!("resp size {}", resp.body.len());
         resp.header.size = resp.body.len() as u32;
         self.write_response(socket, &resp).await?;
 
@@ -83,8 +82,19 @@ impl Server {
 
 }
 
+static LOGGER: SimpleLogger = SimpleLogger;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
+
+    match log::set_logger(&LOGGER).map(|()| log::set_max_level(LevelFilter::Info)) {
+        Ok(()) => {},
+        Err(e) => {
+            println!("set_logger error {}", e);
+            return Err("set_logger error".into())
+        }
+    }
+
     let addr = env::args()
         .nth(1)
         .unwrap_or_else(|| "127.0.0.1:8080".to_string());
@@ -92,18 +102,18 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let listener = match TcpListener::bind(&addr).await {
         Ok(v) => v,
         Err(e) => {
-            println!("bind {} error {}", addr, e);
+            error!("bind {} error {}", addr, e);
             return Err("something went wrong".into())
         }
     };
-    println!("listening on {}", addr);
+    info!("listening on {}", addr);
 
     let server = Arc::new(Server::new());
     loop {
         let (mut socket, _) = match listener.accept().await {
             Ok(v) => v,
             Err(e) => {
-                println!("accept error {}", e);
+                error!("accept error {}", e);
                 continue
             }
         };
@@ -113,7 +123,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             match server_ref.handle_connection(&mut socket).await {
                 Ok(()) => {},
                 Err(e) => {
-                    println!("handle_connection error {}", e);
+                    error!("handle_connection error {}", e);
                 }
             }
         });
