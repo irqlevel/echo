@@ -99,6 +99,7 @@ dependencies = [
  "futures",
  "http",
  "httparse",
+ "log",
  "serde",
  "serde_derive",
  "serde_json",

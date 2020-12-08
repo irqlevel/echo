@@ -6,6 +6,8 @@ use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 
 use crate::error::error::ServerError;
 
+use log::{error};
+
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct RequestHeader {
     pub magic: u32,
@@ -13,7 +15,6 @@ pub struct RequestHeader {
     pub size: u32,
     pub padding: u32
 }
-
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct ResponseHeader {
@@ -31,7 +32,7 @@ impl ResponseHeader {
         match data.write_u32::<BigEndian>(self.magic) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
@@ -39,21 +40,21 @@ impl ResponseHeader {
         match data.write_u32::<BigEndian>(self.id) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
         match data.write_u32::<BigEndian>(self.size) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
         match data.write_u32::<BigEndian>(self.status) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
@@ -66,20 +67,20 @@ impl ResponseHeader {
         self.magic = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
 
         if self.magic != ResponseHeader::MAGIC {
-            println!("invalid request header magic {}", self.magic);
+            error!("invalid request header magic {}", self.magic);
             return Err(ServerError::new())
         }
 
         self.id = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
@@ -87,7 +88,7 @@ impl ResponseHeader {
         self.size = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
@@ -95,7 +96,7 @@ impl ResponseHeader {
         self.status = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
@@ -120,7 +121,7 @@ impl RequestHeader {
         match data.write_u32::<BigEndian>(self.magic) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
@@ -128,21 +129,21 @@ impl RequestHeader {
         match data.write_u32::<BigEndian>(self.id) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
         match data.write_u32::<BigEndian>(self.size) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
         match data.write_u32::<BigEndian>(self.padding) {
             Ok(()) => {},
             Err(e) => {
-                println!("write error {}", e);
+                error!("write error {}", e);
                 return Err(ServerError::new())
             }
         }
@@ -155,20 +156,20 @@ impl RequestHeader {
         self.magic = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
 
         if self.magic != RequestHeader::MAGIC {
-            println!("invalid request header magic {}", self.magic);
+            error!("invalid request header magic {}", self.magic);
             return Err(ServerError::new())
         }
 
         self.id = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
@@ -176,15 +177,15 @@ impl RequestHeader {
         self.size = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
-        //println!("size {}", self.size);
+        //error!("size {}", self.size);
         self.padding = match rdr.read_u32::<BigEndian>() {
             Ok(v) => v,
             Err(e) => {
-                println!("read error {}", e);
+                error!("read error {}", e);
                 return Err(ServerError::new())
             }
         };
