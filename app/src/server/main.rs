@@ -7,7 +7,7 @@ use std::error::Error;
 
 extern crate common_lib;
 
-use common_lib::error::error::ServerError;
+use common_lib::error::error::CommonError;
 use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse};
 
 use std::sync::Arc;
@@ -23,41 +23,44 @@ impl Server {
         Server{}
     }
 
-    async fn handle_echo(&self, request: &EchoRequest) -> Result<EchoResponse, ServerError> {
-        let mut resp = EchoResponse::new();
-        resp.message = request.message.clone();
-        Ok(resp)
-    }
-
-    async fn dispatch_request(&self, request: &Request) -> Result<Response, ServerError> {
-        let mut response = Response::new(&request.req_id, "unsupported request");
-
-        match request.path.as_str() {
-            "echo" => {
-                let creq: EchoRequest = match bincode::deserialize(&request.body) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("desiarilize error {}", e);
-                        return Err(ServerError::new());
-                    }
-                };
-                let cresp = self.handle_echo(&creq).await?;
-                response.body = match bincode::serialize(&cresp) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("serialize error {}", e);
-                        return Err(ServerError::new());
-                    }
-                }
-            }
-            _ => {
-                error!("unknown request {}", request.path);
-            }
-        }
+    async fn handle_echo(&self, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
+        let mut response = EchoResponse::new();
+        response.message = request.message.clone();
         Ok(response)
     }
 
-    async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<(), ServerError> {
+    async fn dispatch_request(&self, request: &Request) -> Result<Response, CommonError> {
+        let mut response = Response::new(&request.req_id, "");
+
+        match request.path.as_str() {
+            "echo" => {
+                let req: EchoRequest = match bincode::deserialize(&request.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("deserialize error {}", e);
+                        response.error = format!("deserialize error {}", e);
+                        return Ok(response)
+                    }
+                };
+                let resp = self.handle_echo(&req).await?;
+                response.body = match bincode::serialize(&resp) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("serialize error {}", e);
+                        response.error = format!("serialize error {}", e);
+                        return Ok(response)
+                    }
+                };
+                return Ok(response)
+            }
+            _ => {
+                response.error = format!("unsupported path {}", request.path);
+                return Ok(response)
+            }
+        }
+    }
+
+    async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
         let request = Request::recv(socket).await?;
 
         let response = self.dispatch_request(&request).await?;
@@ -89,7 +92,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Ok(v) => v,
         Err(e) => {
             error!("bind {} error {}", addr, e);
-            return Err("something went wrong".into())
+            return Err("bind error".into())
         }
     };
     info!("listening on {}", addr);

@@ -8,7 +8,7 @@ extern crate common_lib;
 
 use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse};
 
-use common_lib::error::error::ServerError;
+use common_lib::error::error::CommonError;
 
 use common_lib::logger::logger::SimpleLogger;
 use bincode;
@@ -18,7 +18,7 @@ struct Client {
 }
 
 impl Client {
-    async fn send<T: ?Sized, V: ?Sized>(&mut self, path: &str, request: &T) -> Result<V, ServerError>
+    async fn send<T: ?Sized, V: ?Sized>(&mut self, path: &str, request: &T) -> Result<V, CommonError>
     where
         T: serde::Serialize,
         V: serde::de::DeserializeOwned
@@ -31,24 +31,31 @@ impl Client {
                     Ok(v) => v,
                     Err(e) => {
                         error!("serialize error {}", e);
-                        return Err(ServerError::new())
+                        return Err(CommonError::new(format!("serialize error {}", e)))
                     }
                 };
                 Request::send(sock, &rreq).await?;
 
                 let rresp = Response::recv(sock).await?;
+                if rresp.req_id != rreq.req_id {
+                    return Err(CommonError::new(format!("unexpected response req_id {} vs {}", rresp.req_id, rreq.req_id)))
+                }
+                if rresp.error != "" {
+                    return Err(CommonError::new(format!("response error {}", rresp.error)))
+                }
+
                 let resp: V = match bincode::deserialize(&rresp.body) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("deserialize error {}", e);
-                        return Err(ServerError::new())
+                        return Err(CommonError::new(format!("deserialize error {}", e)))
                     }
                 };
         
                 Ok(resp)
             }
             None => {
-                return Err(ServerError::new())
+                return Err(CommonError::new(format!("socket doesn't exists")))
             }
         }
     }
@@ -57,13 +64,13 @@ impl Client {
         Client{socket: None}
     }
 
-    async fn connect(&mut self, addr: &str) -> Result<(), ServerError> {
+    async fn connect(&mut self, addr: &str) -> Result<(), CommonError> {
         let socket = match tokio::net::TcpStream::connect(addr).await {
             Ok(v) => {
                 v},
             Err(e) => {
                 error!("connect error {}", e);
-                return Err(ServerError::new());
+                return Err(CommonError::new(format!("connect error {}", e)))
             }
         };
 
@@ -71,7 +78,7 @@ impl Client {
         Ok(())
     }
 
-    async fn close(&mut self) -> Result<(), ServerError> {
+    async fn close(&mut self) -> Result<(), CommonError> {
 
         match self.socket.as_mut() {
             Some(e) => {
@@ -79,7 +86,7 @@ impl Client {
                     Ok(()) => Ok(()),
                     Err(e) => {
                         error!("socket shutdown error{}", e);
-                        return Err(ServerError::new());
+                        return Err(CommonError::new(format!("socket shutdown error{}", e)))
                     }
                 }
             }
@@ -90,7 +97,7 @@ impl Client {
     }
 }
 
-async fn test_client() -> Result<(), ServerError> {
+async fn test_client() -> Result<(), CommonError> {
     let addr = env::args()
     .nth(1)
     .unwrap_or_else(|| "127.0.0.1:8080".to_string());
@@ -99,9 +106,10 @@ async fn test_client() -> Result<(), ServerError> {
     
     client.connect(&addr).await?;
 
-    let req = EchoRequest::new();
+    let mut req = EchoRequest::new();
+    req.message = "Hello world!!!!".to_string();
 
-    let resp: EchoResponse = client.send("echo2", &req).await?;
+    let resp: EchoResponse = client.send("echo", &req).await?;
 
     assert_eq!(req.message, resp.message);
 
@@ -127,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("starting");
 
     let mut handles = vec![];
-    for _ in 0..1000000 {
+    for _ in 0..100 {
         handles.push(
         tokio::spawn(async move {
             match test_client().await {
