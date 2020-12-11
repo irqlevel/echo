@@ -2,35 +2,28 @@ pub mod error {
 
 use std::fmt;
 
-pub struct ServerError {
+pub struct CommonError {
     pub code: usize,
     pub message: String,
 }
 
-impl ServerError {
-    pub fn new() -> ServerError {
-        ServerError{code: 0, message: "something went wrong".to_string()}
+impl CommonError {
+    pub fn new(message: String) -> CommonError {
+        CommonError{code: 0, message: message}
     }
 }
 
-// Different error messages according to ServerError.code
-impl fmt::Display for ServerError {
+impl fmt::Display for CommonError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let err_msg = match self.code {
-            404 => "Sorry, Can not find the Page!",
-            _ => "Sorry, something is wrong! Please Try Again!",
-        };
-
-        write!(f, "{}", err_msg)
+        write!(f, "{}", self.message)
     }
 }
 
-// A unique format for dubugging output
-impl fmt::Debug for ServerError {
+impl fmt::Debug for CommonError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(
             f,
-            "ServerError {{ code: {}, message: {} }}",
+            "CommonError {{ code: {}, message: {} }}",
             self.code, self.message
         )
     }
