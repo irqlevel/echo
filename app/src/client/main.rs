@@ -101,7 +101,7 @@ async fn test_client() -> Result<(), ServerError> {
 
     let req = EchoRequest::new();
 
-    let resp: EchoResponse = client.send("echo", &req).await?;
+    let resp: EchoResponse = client.send("echo2", &req).await?;
 
     assert_eq!(req.message, resp.message);
 

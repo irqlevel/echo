@@ -8,10 +8,7 @@ use std::error::Error;
 extern crate common_lib;
 
 use common_lib::error::error::ServerError;
-use common_lib::frame::frame::{RequestHeader, Request, Response};
-
-use common_lib::socket::socket::write as socket_write;
-use common_lib::socket::socket::read as socket_read;
+use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse};
 
 use std::sync::Arc;
 use log::{error, info, LevelFilter};
@@ -26,60 +23,49 @@ impl Server {
         Server{}
     }
 
-    async fn read_header(&self, socket: &mut tokio::net::TcpStream) -> Result<RequestHeader, ServerError> {
-        let mut header_bytes = [0; std::mem::size_of::<RequestHeader>()];
-
-        socket_read(socket, &mut header_bytes).await?;
-
-        let mut header = RequestHeader::new();
-        header.from_bytes(&header_bytes)?;
-
-        Ok(header)
+    async fn handle_echo(&self, request: &EchoRequest) -> Result<EchoResponse, ServerError> {
+        let mut resp = EchoResponse::new();
+        resp.message = request.message.clone();
+        Ok(resp)
     }
 
-    async fn read_body(&self, size: usize, socket: &mut tokio::net::TcpStream) -> Result<Vec<u8>, ServerError> {
-        let mut body = vec![0; size as usize];
+    async fn dispatch_request(&self, request: &Request) -> Result<Response, ServerError> {
+        let mut response = Response::new(&request.req_id, "unsupported request");
 
-        socket_read(socket, &mut body).await?;
-        return Ok(body)
-    }
-
-    async fn read_request(&self, socket: &mut tokio::net::TcpStream) -> Result<Request, ServerError> {
-        let header: RequestHeader = self.read_header(socket).await?;
-
-        let body: Vec<u8> = self.read_body(header.size as usize, socket).await?;
-
-        return Ok(Request{header: header, body: body})
-    }
-
-    async fn handle_req(&self, req: &Request, resp: &mut Response) -> Result<(), ServerError> {
-        resp.body.resize(req.body.len(), 0);
-        resp.body.copy_from_slice(&req.body);
-        return Ok(())
-    }
-
-    async fn write_response(&self, socket: &mut tokio::net::TcpStream, resp: &Response) -> Result<(), ServerError> {
-
-        let header_bytes = resp.header.to_bytes()?;
-
-        socket_write(socket, &header_bytes).await?;
-
-        socket_write(socket, &resp.body).await?;
-
-        Ok(())
+        match request.path.as_str() {
+            "echo" => {
+                let creq: EchoRequest = match bincode::deserialize(&request.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("desiarilize error {}", e);
+                        return Err(ServerError::new());
+                    }
+                };
+                let cresp = self.handle_echo(&creq).await?;
+                response.body = match bincode::serialize(&cresp) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("serialize error {}", e);
+                        return Err(ServerError::new());
+                    }
+                }
+            }
+            _ => {
+                error!("unknown request {}", request.path);
+            }
+        }
+        Ok(response)
     }
 
     async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<(), ServerError> {
-        let req: Request = self.read_request(socket).await?;
+        let request = Request::recv(socket).await?;
 
-        let mut resp = Response::new();
-        self.handle_req(&req, &mut resp).await?;
-        resp.header.size = resp.body.len() as u32;
-        self.write_response(socket, &resp).await?;
+        let response = self.dispatch_request(&request).await?;
+
+        Response::send(socket, &response).await?;
 
         Ok(())
     }
-
 }
 
 static LOGGER: SimpleLogger = SimpleLogger;
