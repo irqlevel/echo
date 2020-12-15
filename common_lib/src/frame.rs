@@ -135,6 +135,7 @@ impl Frame {
 pub struct Request {
     pub path: String,
     pub req_id: String,
+    pub version: String,
     pub body: Vec<u8>
 }
 
@@ -148,7 +149,7 @@ pub struct Response {
 impl Request {
     pub fn new(path: &str) -> Self {
         let req_id = Uuid::new_v4();
-        Request{req_id: req_id.to_simple().to_string(), path: String::from(path), body: vec![0; 0]}
+        Request{req_id: req_id.to_simple().to_string(), path: String::from(path), body: vec![0; 0], version: String::from("1.0.0")}
     }
 
     pub async fn send(socket: &mut tokio::net::TcpStream, req: &Request) -> Result<(), CommonError> {

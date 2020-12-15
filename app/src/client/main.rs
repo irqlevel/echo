@@ -25,26 +25,26 @@ impl Client {
     {
         match self.socket.as_mut() {
             Some(sock) => {
-                let mut rreq = Request::new(path);
+                let mut req = Request::new(path);
 
-                rreq.body = match bincode::serialize(&request) {
+                req.body = match bincode::serialize(&request) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("serialize error {}", e);
                         return Err(CommonError::new(format!("serialize error {}", e)))
                     }
                 };
-                Request::send(sock, &rreq).await?;
+                Request::send(sock, &req).await?;
 
-                let rresp = Response::recv(sock).await?;
-                if rresp.req_id != rreq.req_id {
-                    return Err(CommonError::new(format!("unexpected response req_id {} vs {}", rresp.req_id, rreq.req_id)))
+                let resp = Response::recv(sock).await?;
+                if resp.req_id != req.req_id {
+                    return Err(CommonError::new(format!("unexpected response req_id {} vs {}", resp.req_id, req.req_id)))
                 }
-                if rresp.error != "" {
-                    return Err(CommonError::new(format!("response error {}", rresp.error)))
+                if resp.error != "" {
+                    return Err(CommonError::new(format!("response error {}", resp.error)))
                 }
 
-                let resp: V = match bincode::deserialize(&rresp.body) {
+                let response: V = match bincode::deserialize(&resp.body) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("deserialize error {}", e);
@@ -52,7 +52,7 @@ impl Client {
                     }
                 };
         
-                Ok(resp)
+                Ok(response)
             }
             None => {
                 return Err(CommonError::new(format!("socket doesn't exists")))

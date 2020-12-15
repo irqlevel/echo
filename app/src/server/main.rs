@@ -32,6 +32,11 @@ impl Server {
     async fn dispatch_request(&self, request: &Request) -> Result<Response, CommonError> {
         let mut response = Response::new(&request.req_id, "");
 
+        if request.version.as_str() != "1.0.0" {
+            response.error = format!("unsupported version {}", request.version);
+            return Ok(response)
+        }
+
         match request.path.as_str() {
             "echo" => {
                 let req: EchoRequest = match bincode::deserialize(&request.body) {
