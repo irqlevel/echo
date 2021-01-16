@@ -15,12 +15,33 @@ use log::{error, info, LevelFilter};
 
 use common_lib::logger::logger::SimpleLogger;
 
-struct Server;
+use serde_derive::Deserialize;
+use std::fs::File;
+use std::io::Read;
+use std::fs;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[derive(Deserialize)]
+struct Config {
+    address: String,
+    nodes: Vec<String>,
+    cluster_id: String,
+    storage_path: String
+}
+
+use tokio::sync::RwLock;
+use tokio::signal::unix::{signal, SignalKind};
+
+struct Server {
+    config: Config,
+    task_count: AtomicUsize,
+    shutdown: bool
+}
 
 impl Server {
 
-    fn new() -> Self {
-        Server{}
+    fn new(config: Config) -> Self {
+        Server{config: config, shutdown: false, task_count: AtomicUsize::new(0)}
     }
 
     async fn handle_echo(&self, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
@@ -74,6 +95,84 @@ impl Server {
 
         Ok(())
     }
+
+    async fn shutdown(server: Arc<Server>) {
+        info!("shutdowning pending tasks {}", server.task_count.fetch_add(0, Ordering::SeqCst));
+
+        loop {
+            if server.task_count.fetch_add(0, Ordering::SeqCst) == 0 {
+                break;
+            }
+            tokio::task::yield_now().await;
+            //info!("wait pending tasks");
+        }
+        info!("shutdowned");
+        std::process::exit(0);
+    }
+
+    async fn run(server: Arc<Server>) -> Result<(), CommonError> {
+        let mut sig_term_stream = match signal(SignalKind::terminate()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("signal error {}", e);
+                return Err(CommonError::new(format!("signal error")));
+            }
+        };
+
+        let mut sig_int_stream = match signal(SignalKind::interrupt()) {
+            Ok(v) => v,
+            Err(e) => {
+                error!("signal error {}", e);
+                return Err(CommonError::new(format!("signal error")));
+            }
+        };
+
+        let listener = match TcpListener::bind(server.config.address.clone()).await {
+            Ok(v) => v,
+            Err(e) => {
+                error!("bind {} error {}", server.config.address, e);
+                return Err(CommonError::new(format!("bind error")));
+            }
+        };
+    
+        loop {
+            tokio::select! {
+                accept_result = listener.accept() => {
+                    match accept_result {
+                        Ok(connection) => {
+                            let mut socket = connection.0;
+                            let server_ref = server.clone();
+                            server.task_count.fetch_add(1, Ordering::SeqCst);
+                            tokio::spawn(async move {
+                                match server_ref.handle_connection(&mut socket).await {
+                                    Ok(()) => {},
+                                    Err(e) => {
+                                        error!("handle_connection error {}", e);
+                                    }
+                                }
+                                server_ref.task_count.fetch_sub(1, Ordering::SeqCst);
+                            });        
+                        }
+                        Err(e) => {
+                            error!("handle_connection error {}", e);
+                        }
+                    }    
+                }
+
+                _sig_term_result = sig_term_stream.recv() => {
+                    info!("received sig term");
+                    let server_ref = server.clone();
+                    Server::shutdown(server_ref).await;
+                }
+
+                _sig_int_result = sig_int_stream.recv() => {
+                    info!("received sig int");
+                    let server_ref = server.clone();
+                    Server::shutdown(server_ref).await;
+                }
+            }
+        }
+    }
 }
 
 static LOGGER: SimpleLogger = SimpleLogger;
@@ -89,37 +188,25 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     }
 
-    let addr = env::args()
+    let config_path = env::args()
         .nth(1)
-        .unwrap_or_else(|| "127.0.0.1:8080".to_string());
+        .unwrap_or_else(|| "/etc/rserver/config.toml".to_string());
 
-    let listener = match TcpListener::bind(&addr).await {
-        Ok(v) => v,
+    let mut config_file = File::open(config_path)?;
+    let mut config_data = Vec::new();
+    config_file.read_to_end(&mut config_data)?;
+    let config: Config = toml::from_slice(&config_data)?;
+
+    info!("listening on {} clusterId {} nodes {:?} storage_path {}", config.address, config.cluster_id, config.nodes, config.storage_path);
+
+    fs::create_dir_all(&config.storage_path)?;
+
+    let server = Arc::new(Server::new(config));
+    match Server::run(server).await {
+        Ok(()) => Ok(()),
         Err(e) => {
-            error!("bind {} error {}", addr, e);
-            return Err("bind error".into())
+            error!("run error {}", e);
+            return Err("run error".into())
         }
-    };
-    info!("listening on {}", addr);
-
-    let server = Arc::new(Server::new());
-    loop {
-        let (mut socket, _) = match listener.accept().await {
-            Ok(v) => v,
-            Err(e) => {
-                error!("accept error {}", e);
-                continue
-            }
-        };
-
-        let server_ref = server.clone();
-        tokio::spawn(async move {
-            match server_ref.handle_connection(&mut socket).await {
-                Ok(()) => {},
-                Err(e) => {
-                    error!("handle_connection error {}", e);
-                }
-            }
-        });
     }
 }

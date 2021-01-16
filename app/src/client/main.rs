@@ -135,7 +135,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     info!("starting");
 
     let mut handles = vec![];
-    for _ in 0..100 {
+    for _ in 0..100000 {
         handles.push(
         tokio::spawn(async move {
             match test_client().await {
