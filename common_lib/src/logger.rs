@@ -34,19 +34,21 @@ impl SimpleLogger {
             }
         }
     }
-}
 
+    fn gettid() -> u64 {
+        unsafe { libc::syscall(libc::SYS_gettid) as u64 }
+    }
+}
 
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= Level::Info
     }
 
-
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            println!("<{}>{} {},{} {}", SimpleLogger::level_to_systemdlevel(record.level()),
-                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f"), record.file().unwrap(), record.line().unwrap(), record.args());
+            println!("<{}>{} {},{} {},{} {}", SimpleLogger::level_to_systemdlevel(record.level()),
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f"), std::process::id(), SimpleLogger::gettid(), record.file().unwrap(), record.line().unwrap(), record.args());
         }
     }
 
