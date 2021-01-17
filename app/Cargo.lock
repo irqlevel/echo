@@ -102,6 +102,7 @@ dependencies = [
  "bincode",
  "byteorder",
  "bytes 0.6.0",
+ "chrono",
  "futures",
  "http",
  "httparse",

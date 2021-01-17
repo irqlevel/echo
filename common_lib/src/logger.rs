@@ -36,6 +36,7 @@ impl SimpleLogger {
     }
 }
 
+
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &Metadata) -> bool {
         metadata.level() <= Level::Info
@@ -44,7 +45,8 @@ impl log::Log for SimpleLogger {
 
     fn log(&self, record: &Record) {
         if self.enabled(record.metadata()) {
-            println!("<{}>{}", SimpleLogger::level_to_systemdlevel(record.level()), record.args());
+            println!("<{}>{} {},{} {}", SimpleLogger::level_to_systemdlevel(record.level()),
+                chrono::Utc::now().format("%Y-%m-%d %H:%M:%S%.6f"), record.file().unwrap(), record.line().unwrap(), record.args());
         }
     }
 

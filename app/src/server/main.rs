@@ -31,6 +31,7 @@ struct Config {
 
 use tokio::sync::RwLock;
 use tokio::signal::unix::{signal, SignalKind};
+use tokio::time::{sleep, Duration};
 
 struct Server {
     config: Config,
@@ -97,16 +98,21 @@ impl Server {
     }
 
     async fn shutdown(server: Arc<Server>) {
-        info!("shutdowning pending tasks {}", server.task_count.fetch_add(0, Ordering::SeqCst));
+        info!("shutdowning");
 
         loop {
-            if server.task_count.fetch_add(0, Ordering::SeqCst) == 0 {
+            let pending_tasks = server.task_count.fetch_add(0, Ordering::SeqCst);
+            if pending_tasks == 0 {
                 break;
             }
-            tokio::task::yield_now().await;
-            //info!("wait pending tasks");
+
+            info!("pending tasks {}", pending_tasks);
+
+            sleep(Duration::from_millis(1000)).await;
         }
+
         info!("shutdowned");
+
         std::process::exit(0);
     }
 
