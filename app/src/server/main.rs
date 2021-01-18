@@ -97,8 +97,18 @@ impl Server {
         Ok(())
     }
 
-    async fn shutdown(server: Arc<Server>) {
+    fn set_shutdown(&mut self) {
+        self.shutdown = true;
+    }
+
+    async fn heartbeat(&self, server: &Arc<Server>) -> Result<(), CommonError> {
+        Ok(())
+    }
+
+    async fn shutdown(server: &Arc<Server>) {
         info!("shutdowning");
+
+        server.set_shutdown();
 
         loop {
             let pending_tasks = server.task_count.fetch_add(0, Ordering::SeqCst);
@@ -116,7 +126,7 @@ impl Server {
         std::process::exit(0);
     }
 
-    async fn run(server: Arc<Server>) -> Result<(), CommonError> {
+    async fn run(server: &Arc<Server>) -> Result<(), CommonError> {
         let mut sig_term_stream = match signal(SignalKind::terminate()) {
             Ok(v) => v,
             Err(e) => {
@@ -140,7 +150,24 @@ impl Server {
                 return Err(CommonError::new(format!("bind error")));
             }
         };
-    
+
+        let server_ref = server.clone();
+        server.task_count.fetch_add(1, Ordering::SeqCst);
+        tokio::spawn(async move {
+            loop {
+                match server_ref.heartbeat(&server_ref).await {
+                    Ok(()) => {},
+                    Err(e) => {
+                        error!("heartbeat error {}", e);
+                    }
+                }
+                if server_ref.shutdown {
+                    break;
+                }
+            }
+            server_ref.task_count.fetch_sub(1, Ordering::SeqCst);
+        });
+
         loop {
             tokio::select! {
                 accept_result = listener.accept() => {
@@ -168,13 +195,13 @@ impl Server {
                 _sig_term_result = sig_term_stream.recv() => {
                     info!("received sig term");
                     let server_ref = server.clone();
-                    Server::shutdown(server_ref).await;
+                    Server::shutdown(&server_ref).await;
                 }
 
                 _sig_int_result = sig_int_stream.recv() => {
                     info!("received sig int");
                     let server_ref = server.clone();
-                    Server::shutdown(server_ref).await;
+                    Server::shutdown(&server_ref).await;
                 }
             }
         }
@@ -208,7 +235,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     fs::create_dir_all(&config.storage_path)?;
 
     let server = Arc::new(Server::new(config));
-    match Server::run(server).await {
+    match Server::run(&server).await {
         Ok(()) => Ok(()),
         Err(e) => {
             error!("run error {}", e);
