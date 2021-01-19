@@ -102,6 +102,7 @@ impl Server {
     }
 
     async fn heartbeat(&self) -> Result<(), CommonError> {
+        info!("heartbeat");
         Ok(())
     }
 
@@ -164,6 +165,7 @@ impl Server {
                 if server_ref.read().await.shutdown {
                     break;
                 }
+                sleep(Duration::from_millis(1000)).await;
             }
             server_ref.read().await.task_count.fetch_sub(1, Ordering::SeqCst);
         });
