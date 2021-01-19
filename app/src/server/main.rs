@@ -101,17 +101,17 @@ impl Server {
         self.shutdown = true;
     }
 
-    async fn heartbeat(&self, server: &Arc<Server>) -> Result<(), CommonError> {
+    async fn heartbeat(&self) -> Result<(), CommonError> {
         Ok(())
     }
 
-    async fn shutdown(server: &Arc<Server>) {
+    async fn shutdown(server: &ServerRef) {
         info!("shutdowning");
 
-        server.set_shutdown();
+        server.write().await.set_shutdown();
 
         loop {
-            let pending_tasks = server.task_count.fetch_add(0, Ordering::SeqCst);
+            let pending_tasks = server.read().await.task_count.fetch_add(0, Ordering::SeqCst);
             if pending_tasks == 0 {
                 break;
             }
@@ -126,7 +126,7 @@ impl Server {
         std::process::exit(0);
     }
 
-    async fn run(server: &Arc<Server>) -> Result<(), CommonError> {
+    async fn run(server: &ServerRef) -> Result<(), CommonError> {
         let mut sig_term_stream = match signal(SignalKind::terminate()) {
             Ok(v) => v,
             Err(e) => {
@@ -143,29 +143,29 @@ impl Server {
             }
         };
 
-        let listener = match TcpListener::bind(server.config.address.clone()).await {
+        let listener = match TcpListener::bind(server.read().await.config.address.clone()).await {
             Ok(v) => v,
             Err(e) => {
-                error!("bind {} error {}", server.config.address, e);
+                error!("bind {} error {}", server.read().await.config.address, e);
                 return Err(CommonError::new(format!("bind error")));
             }
         };
 
         let server_ref = server.clone();
-        server.task_count.fetch_add(1, Ordering::SeqCst);
+        server.read().await.task_count.fetch_add(1, Ordering::SeqCst);
         tokio::spawn(async move {
             loop {
-                match server_ref.heartbeat(&server_ref).await {
+                match server_ref.read().await.heartbeat().await {
                     Ok(()) => {},
                     Err(e) => {
                         error!("heartbeat error {}", e);
                     }
                 }
-                if server_ref.shutdown {
+                if server_ref.read().await.shutdown {
                     break;
                 }
             }
-            server_ref.task_count.fetch_sub(1, Ordering::SeqCst);
+            server_ref.read().await.task_count.fetch_sub(1, Ordering::SeqCst);
         });
 
         loop {
@@ -175,15 +175,15 @@ impl Server {
                         Ok(connection) => {
                             let mut socket = connection.0;
                             let server_ref = server.clone();
-                            server.task_count.fetch_add(1, Ordering::SeqCst);
+                            server.read().await.task_count.fetch_add(1, Ordering::SeqCst);
                             tokio::spawn(async move {
-                                match server_ref.handle_connection(&mut socket).await {
+                                match server_ref.read().await.handle_connection(&mut socket).await {
                                     Ok(()) => {},
                                     Err(e) => {
                                         error!("handle_connection error {}", e);
                                     }
                                 }
-                                server_ref.task_count.fetch_sub(1, Ordering::SeqCst);
+                                server_ref.read().await.task_count.fetch_sub(1, Ordering::SeqCst);
                             });        
                         }
                         Err(e) => {
@@ -210,6 +210,8 @@ impl Server {
 
 static LOGGER: SimpleLogger = SimpleLogger;
 
+type ServerRef = Arc<RwLock<Server>>;
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
 
@@ -234,7 +236,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     fs::create_dir_all(&config.storage_path)?;
 
-    let server = Arc::new(Server::new(config));
+    let server = Arc::new(RwLock::new(Server::new(config)));
     match Server::run(&server).await {
         Ok(()) => Ok(()),
         Err(e) => {
