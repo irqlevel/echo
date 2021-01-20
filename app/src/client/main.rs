@@ -6,96 +6,13 @@ use log::{error, info, LevelFilter};
 
 extern crate common_lib;
 
-use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse};
+use common_lib::frame::frame::{EchoRequest, EchoResponse};
 
 use common_lib::error::error::CommonError;
 
 use common_lib::logger::logger::SimpleLogger;
-use bincode;
+use common_lib::client::client::Client;
 
-struct Client {
-    socket: Option<tokio::net::TcpStream>
-}
-
-impl Client {
-    async fn send<T: ?Sized, V: ?Sized>(&mut self, path: &str, request: &T) -> Result<V, CommonError>
-    where
-        T: serde::Serialize,
-        V: serde::de::DeserializeOwned
-    {
-        match self.socket.as_mut() {
-            Some(sock) => {
-                let mut req = Request::new(path);
-
-                req.body = match bincode::serialize(&request) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("serialize error {}", e);
-                        return Err(CommonError::new(format!("serialize error {}", e)))
-                    }
-                };
-                Request::send(sock, &req).await?;
-
-                let resp = Response::recv(sock).await?;
-                if resp.req_id != req.req_id {
-                    return Err(CommonError::new(format!("unexpected response req_id {} vs {}", resp.req_id, req.req_id)))
-                }
-                if resp.error != "" {
-                    return Err(CommonError::new(format!("response error {}", resp.error)))
-                }
-
-                let response: V = match bincode::deserialize(&resp.body) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        error!("deserialize error {}", e);
-                        return Err(CommonError::new(format!("deserialize error {}", e)))
-                    }
-                };
-        
-                Ok(response)
-            }
-            None => {
-                return Err(CommonError::new(format!("socket doesn't exists")))
-            }
-        }
-    }
-
-    fn new() -> Client {
-        Client{socket: None}
-    }
-
-    async fn connect(&mut self, addr: &str) -> Result<(), CommonError> {
-        let socket = match tokio::net::TcpStream::connect(addr).await {
-            Ok(v) => {
-                v},
-            Err(e) => {
-                error!("connect error {}", e);
-                return Err(CommonError::new(format!("connect error {}", e)))
-            }
-        };
-
-        self.socket = Some(socket);
-        Ok(())
-    }
-
-    async fn close(&mut self) -> Result<(), CommonError> {
-
-        match self.socket.as_mut() {
-            Some(e) => {
-                match e.shutdown().await {
-                    Ok(()) => Ok(()),
-                    Err(e) => {
-                        error!("socket shutdown error{}", e);
-                        return Err(CommonError::new(format!("socket shutdown error{}", e)))
-                    }
-                }
-            }
-            None => {
-                Ok(())
-            }
-        }
-    }
-}
 
 async fn test_client() -> Result<(), CommonError> {
     let addr = env::args()

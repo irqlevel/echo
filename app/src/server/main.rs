@@ -20,6 +20,7 @@ use std::fs::File;
 use std::io::Read;
 use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use common_lib::client::client::Client;
 
 #[derive(Deserialize)]
 struct Config {
@@ -103,6 +104,18 @@ impl Server {
 
     async fn heartbeat(&self) -> Result<(), CommonError> {
         info!("heartbeat");
+
+        for node_addr in &self.config.nodes {
+            let mut client = Client::new();
+
+            client.connect(&node_addr).await?;
+            let mut req = EchoRequest::new();
+            req.message = "Hello world!!!!".to_string();
+            let resp: EchoResponse = client.send("echo", &req).await?;
+            assert_eq!(req.message, resp.message);
+        
+            client.close().await?;
+        }
         Ok(())
     }
 

@@ -1,4 +1,0 @@
-address = "127.0.0.1:8080"
-nodes = ["33.22.31.21:8080", "32.12.12.12:8080"]
-cluster_id = "basdewefue"
-storage_path = "/tmp/rserver"
