@@ -8,7 +8,7 @@ use std::error::Error;
 extern crate common_lib;
 
 use common_lib::error::error::CommonError;
-use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse};
+use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, HeartbeatRequest, HeartbeatResponse};
 
 use std::sync::Arc;
 use log::{error, info, LevelFilter};
@@ -27,7 +27,8 @@ struct Config {
     address: String,
     nodes: Vec<String>,
     cluster_id: String,
-    storage_path: String
+    storage_path: String,
+    node_id: String
 }
 
 use tokio::sync::RwLock;
@@ -48,9 +49,27 @@ impl Server {
         Server{config: config, shutdown: false, task_count: AtomicUsize::new(0)}
     }
 
-    async fn handle_echo(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
+    async fn echo_handler(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
         let mut response = EchoResponse::new();
         response.message = request.message.clone();
+        Ok(response)
+    }
+
+    async fn heartbeat_handler(server: &ServerRef, request: &HeartbeatRequest) -> Result<HeartbeatResponse, CommonError> {
+        {
+            let rserver = server.read().await;
+            if rserver.config.cluster_id != request.cluster_id {
+                error!("unexpected cluster_id {} vs {}", request.cluster_id, rserver.config.cluster_id);
+                return Err(CommonError::new(format!("unexpected cluster id")));
+            }
+        }
+        let mut response = HeartbeatResponse::new();
+        let (cluster_id, node_id) = {
+            let rserver = server.read().await;
+            (rserver.config.cluster_id.clone(), rserver.config.node_id.clone())
+        };
+        response.cluster_id = cluster_id;
+        response.node_id = node_id;
         Ok(response)
     }
 
@@ -72,7 +91,27 @@ impl Server {
                         return Ok(response)
                     }
                 };
-                let resp = Server::handle_echo(server, &req).await?;
+                let resp = Server::echo_handler(server, &req).await?;
+                response.body = match bincode::serialize(&resp) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("serialize error {}", e);
+                        response.error = format!("serialize error {}", e);
+                        return Ok(response)
+                    }
+                };
+                return Ok(response)
+            }
+            "heartbeat" => {
+                let req: HeartbeatRequest = match bincode::deserialize(&request.body) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        error!("deserialize error {}", e);
+                        response.error = format!("deserialize error {}", e);
+                        return Ok(response)
+                    }
+                };
+                let resp = Server::heartbeat_handler(server, &req).await?;
                 response.body = match bincode::serialize(&resp) {
                     Ok(v) => v,
                     Err(e) => {
@@ -100,11 +139,35 @@ impl Server {
         Ok(())
     }
 
+    async fn heartbeat_to_node(server: &ServerRef, node_addr: &str) -> Result<(), CommonError> {
+        let mut client = Client::new();
+
+        info!("connecting {}", node_addr);
+        client.connect(node_addr).await?;
+        info!("connected {}", node_addr);
+
+        let mut req = HeartbeatRequest::new();
+        let (cluster_id, node_id) = {
+            let rserver = server.read().await;
+            (rserver.config.cluster_id.clone(), rserver.config.node_id.clone())
+        };
+        req.cluster_id = cluster_id;
+        req.node_id = node_id;
+
+        let resp: HeartbeatResponse = client.send("heartbeat", &req).await?;
+        client.close().await?;
+        info!("addr {} cluster_id {} node_id {}", node_addr, resp.cluster_id, resp.node_id);
+        if req.cluster_id != resp.cluster_id {
+            error!("unexpected cluster_id {} vs. {}", req.cluster_id, resp.cluster_id);
+            return Err(CommonError::new(format!("unexpected cluster id")));
+        }
+        Ok(())
+    }
+
     async fn heartbeat(server: &ServerRef) -> Result<(), CommonError> {
         info!("heartbeat");
 
         let mut nodes : Vec<String> = Vec::new();
-
         {
             let rserver = server.read().await;
             for node in &rserver.config.nodes {
@@ -113,17 +176,10 @@ impl Server {
         }
 
         for node in nodes {
-            let mut client = Client::new();
-
-            info!("connecting {}", node);
-            client.connect(&node).await?;
-            info!("connected {}", node);
-
-            let mut req = EchoRequest::new();
-            req.message = "Hello world!!!!".to_string();
-            let resp: EchoResponse = client.send("echo", &req).await?;
-            info!("response {}", resp.message);
-            client.close().await?;
+            match Server::heartbeat_to_node(server, &node).await {
+                Ok(()) => {},
+                Err(_e) => {},
+            }
         }
 
         info!("heartbeat done");
@@ -167,6 +223,12 @@ impl Server {
         rserver.task_count.fetch_sub(1, Ordering::SeqCst);
     }
 
+    async fn get_shutdown(server: &ServerRef) -> bool {
+        let rserver = server.read().await;
+        info!("shutdown {}", rserver.shutdown);
+        rserver.shutdown
+    }
+
     async fn run(server: &ServerRef) -> Result<(), CommonError> {
         let mut sig_term_stream = match signal(SignalKind::terminate()) {
             Ok(v) => v,
@@ -208,24 +270,13 @@ impl Server {
                     }
                 }
 
-                let shutdown = {
-                    let rserver = server_ref.read().await;
-                    info!("shutdown {}", rserver.shutdown);
-                    rserver.shutdown
-                };
-
-                if shutdown {
+                if Server::get_shutdown(&server_ref).await {
                     break;
                 }
+
                 sleep(Duration::from_millis(1000)).await;
 
-                let shutdown = {
-                    let rserver = server_ref.read().await;
-                    info!("shutdown {}", rserver.shutdown);
-                    rserver.shutdown
-                };
-
-                if shutdown {
+                if Server::get_shutdown(&server_ref).await {
                     break;
                 }
             }

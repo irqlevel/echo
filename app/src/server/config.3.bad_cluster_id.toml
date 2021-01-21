@@ -1,0 +1,5 @@
+address = "127.0.0.1:8083"
+nodes = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"]
+cluster_id = "basdeeewefue"
+storage_path = "/tmp/rserver3"
+node_id = "ssdd"

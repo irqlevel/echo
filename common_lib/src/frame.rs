@@ -235,4 +235,29 @@ impl EchoResponse {
     }
 }
 
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct HeartbeatRequest {
+    pub cluster_id: String,
+    pub node_id: String
+}
+
+impl HeartbeatRequest {
+    pub fn new() -> Self {
+        HeartbeatRequest{cluster_id: "".to_string(), node_id: "".to_string()}
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct HeartbeatResponse {
+    pub cluster_id: String,
+    pub node_id: String
+}
+
+impl HeartbeatResponse {
+    pub fn new() -> Self {
+        HeartbeatResponse{cluster_id: "".to_string(), node_id: "".to_string()}
+    }
+}
+
 }
