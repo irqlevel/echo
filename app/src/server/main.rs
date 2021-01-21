@@ -40,19 +40,21 @@ struct Server {
     shutdown: bool
 }
 
+type ServerRef = Arc<RwLock<Server>>;
+
 impl Server {
 
     fn new(config: Config) -> Self {
         Server{config: config, shutdown: false, task_count: AtomicUsize::new(0)}
     }
 
-    async fn handle_echo(&self, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
+    async fn handle_echo(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
         let mut response = EchoResponse::new();
         response.message = request.message.clone();
         Ok(response)
     }
 
-    async fn dispatch_request(&self, request: &Request) -> Result<Response, CommonError> {
+    async fn dispatch_request(server: &ServerRef, request: &Request) -> Result<Response, CommonError> {
         let mut response = Response::new(&request.req_id, "");
 
         if request.version.as_str() != "1.0.0" {
@@ -70,7 +72,7 @@ impl Server {
                         return Ok(response)
                     }
                 };
-                let resp = self.handle_echo(&req).await?;
+                let resp = Server::handle_echo(server, &req).await?;
                 response.body = match bincode::serialize(&resp) {
                     Ok(v) => v,
                     Err(e) => {
@@ -88,56 +90,81 @@ impl Server {
         }
     }
 
-    async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
+    async fn handle_connection(server: &ServerRef, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
         let request = Request::recv(socket).await?;
 
-        let response = self.dispatch_request(&request).await?;
+        let response = Server::dispatch_request(server, &request).await?;
 
         Response::send(socket, &response).await?;
 
         Ok(())
     }
 
-    fn set_shutdown(&mut self) {
-        self.shutdown = true;
-    }
-
-    async fn heartbeat(&self) -> Result<(), CommonError> {
+    async fn heartbeat(server: &ServerRef) -> Result<(), CommonError> {
         info!("heartbeat");
 
-        for node_addr in &self.config.nodes {
+        let mut nodes : Vec<String> = Vec::new();
+
+        {
+            let rserver = server.read().await;
+            for node in &rserver.config.nodes {
+                nodes.push(node.to_string());
+            }
+        }
+
+        for node in nodes {
             let mut client = Client::new();
 
-            client.connect(&node_addr).await?;
+            info!("connecting {}", node);
+            client.connect(&node).await?;
+            info!("connected {}", node);
+
             let mut req = EchoRequest::new();
             req.message = "Hello world!!!!".to_string();
             let resp: EchoResponse = client.send("echo", &req).await?;
-            assert_eq!(req.message, resp.message);
-        
+            info!("response {}", resp.message);
             client.close().await?;
         }
+
+        info!("heartbeat done");
         Ok(())
     }
 
     async fn shutdown(server: &ServerRef) {
         info!("shutdowning");
 
-        server.write().await.set_shutdown();
+        {
+            let mut wserver = server.write().await;
+            wserver.shutdown = true;
+        }
 
         loop {
-            let pending_tasks = server.read().await.task_count.fetch_add(0, Ordering::SeqCst);
+            let pending_tasks = Server::get_pending_tasks(server).await;
             if pending_tasks == 0 {
                 break;
             }
 
             info!("pending tasks {}", pending_tasks);
-
             sleep(Duration::from_millis(1000)).await;
         }
 
         info!("shutdowned");
-
         std::process::exit(0);
+    }
+
+    async fn get_pending_tasks(server: &ServerRef) -> usize {
+        let rserver = server.read().await;
+        return rserver.task_count.fetch_add(0, Ordering::SeqCst);
+    }
+
+    async fn inc_pending_tasks(server: &ServerRef) {
+        let rserver = server.read().await;
+        rserver.task_count.fetch_add(1, Ordering::SeqCst);
+    }
+
+    async fn dec_pending_tasks(server: &ServerRef) {
+        let rserver = server.read().await;
+        rserver.task_count.fetch_sub(1, Ordering::SeqCst);
     }
 
     async fn run(server: &ServerRef) -> Result<(), CommonError> {
@@ -157,30 +184,52 @@ impl Server {
             }
         };
 
-        let listener = match TcpListener::bind(server.read().await.config.address.clone()).await {
+        let address = {
+            let rserver = server.read().await;
+            rserver.config.address.clone()
+        };
+
+        let listener = match TcpListener::bind(&address).await {
             Ok(v) => v,
             Err(e) => {
-                error!("bind {} error {}", server.read().await.config.address, e);
+                error!("bind {} error {}", address, e);
                 return Err(CommonError::new(format!("bind error")));
             }
         };
 
         let server_ref = server.clone();
-        server.read().await.task_count.fetch_add(1, Ordering::SeqCst);
+        Server::inc_pending_tasks(&server_ref).await;
         tokio::spawn(async move {
             loop {
-                match server_ref.read().await.heartbeat().await {
+                match Server::heartbeat(&server_ref).await {
                     Ok(()) => {},
                     Err(e) => {
                         error!("heartbeat error {}", e);
                     }
                 }
-                if server_ref.read().await.shutdown {
+
+                let shutdown = {
+                    let rserver = server_ref.read().await;
+                    info!("shutdown {}", rserver.shutdown);
+                    rserver.shutdown
+                };
+
+                if shutdown {
                     break;
                 }
                 sleep(Duration::from_millis(1000)).await;
+
+                let shutdown = {
+                    let rserver = server_ref.read().await;
+                    info!("shutdown {}", rserver.shutdown);
+                    rserver.shutdown
+                };
+
+                if shutdown {
+                    break;
+                }
             }
-            server_ref.read().await.task_count.fetch_sub(1, Ordering::SeqCst);
+            Server::dec_pending_tasks(&server_ref).await;
         });
 
         loop {
@@ -190,15 +239,15 @@ impl Server {
                         Ok(connection) => {
                             let mut socket = connection.0;
                             let server_ref = server.clone();
-                            server.read().await.task_count.fetch_add(1, Ordering::SeqCst);
+                            Server::inc_pending_tasks(server).await;
                             tokio::spawn(async move {
-                                match server_ref.read().await.handle_connection(&mut socket).await {
+                                match Server::handle_connection(&server_ref, &mut socket).await {
                                     Ok(()) => {},
                                     Err(e) => {
                                         error!("handle_connection error {}", e);
                                     }
                                 }
-                                server_ref.read().await.task_count.fetch_sub(1, Ordering::SeqCst);
+                                Server::dec_pending_tasks(&server_ref).await;
                             });        
                         }
                         Err(e) => {
@@ -224,8 +273,6 @@ impl Server {
 }
 
 static LOGGER: SimpleLogger = SimpleLogger;
-
-type ServerRef = Arc<RwLock<Server>>;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
