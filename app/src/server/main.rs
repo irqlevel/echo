@@ -34,11 +34,21 @@ struct Config {
 use tokio::sync::RwLock;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{sleep, Duration};
+use std::collections::HashMap;
+
+struct Neighbour {
+    node_id: String,
+    state: u32
+}
+
+type NeighbourRef = Arc<RwLock<Neighbour>>;
+
 
 struct Server {
     config: Config,
     task_count: AtomicUsize,
-    shutdown: bool
+    shutdown: bool,
+    neighbour_map: Arc<RwLock<HashMap<String, NeighbourRef>>>
 }
 
 type ServerRef = Arc<RwLock<Server>>;
@@ -46,7 +56,7 @@ type ServerRef = Arc<RwLock<Server>>;
 impl Server {
 
     fn new(config: Config) -> Self {
-        Server{config: config, shutdown: false, task_count: AtomicUsize::new(0)}
+        Server{config: config, shutdown: false, task_count: AtomicUsize::new(0), neighbour_map: Arc::new(RwLock::new(HashMap::new()))}
     }
 
     async fn echo_handler(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
@@ -160,6 +170,25 @@ impl Server {
         if req.cluster_id != resp.cluster_id {
             error!("unexpected cluster_id {} vs. {}", req.cluster_id, resp.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
+        }
+
+        let neighbour_map = {
+            let rserver = server.read().await;
+            rserver.neighbour_map.clone()
+        };
+
+        {
+            let rneighbour_map = neighbour_map.read().await;
+            if rneighbour_map.contains_key(&resp.node_id) {
+                match rneighbour_map.get(&resp.node_id) {
+                    Some(n) => {
+                        let mut neighbour = n.write().await;
+                        neighbour.state = 1;
+                    }
+                    None => {
+                    }
+                }
+            }
         }
         Ok(())
     }
