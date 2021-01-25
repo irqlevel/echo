@@ -36,13 +36,28 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
 
+enum NeighbourState {
+    Invalid,
+    Active
+}
+
 struct Neighbour {
     node_id: String,
-    state: u32
+    address: String,
+    state: NeighbourState
+}
+
+impl Neighbour {
+    fn new(node_id: &str, state: NeighbourState, address: &str) -> Neighbour {
+        Neighbour{node_id: node_id.to_string(), state: state, address: address.to_string()}
+    }
+
+    fn set_state(&mut self, state: NeighbourState) {
+        self.state = state;
+    }
 }
 
 type NeighbourRef = Arc<RwLock<Neighbour>>;
-
 
 struct Server {
     config: Config,
@@ -172,6 +187,11 @@ impl Server {
             return Err(CommonError::new(format!("unexpected cluster id")));
         }
 
+        if req.node_id == resp.node_id {
+            info!("detected self: node_id {} addr {}", req.node_id, node_addr);
+            return Ok(())
+        }
+
         let neighbour_map = {
             let rserver = server.read().await;
             rserver.neighbour_map.clone()
@@ -179,18 +199,33 @@ impl Server {
 
         {
             let rneighbour_map = neighbour_map.read().await;
-            if rneighbour_map.contains_key(&resp.node_id) {
-                match rneighbour_map.get(&resp.node_id) {
-                    Some(n) => {
-                        let mut neighbour = n.write().await;
-                        neighbour.state = 1;
-                    }
-                    None => {
-                    }
+            match rneighbour_map.get(&resp.node_id) {
+                Some(n) => {
+                    let mut neighbour = n.write().await;
+                    neighbour.set_state(NeighbourState::Active);
+                    return Ok(())
+                }
+                None => {
                 }
             }
         }
-        Ok(())
+
+        {
+            let mut wneighbour_map = neighbour_map.write().await;
+            match wneighbour_map.get(&resp.node_id) {
+                Some(n) => {
+                    let mut neighbour = n.write().await;
+                    neighbour.set_state(NeighbourState::Active);
+                    return Ok(())
+                }
+                None => {
+                    let neighbour = Arc::new(RwLock::new(Neighbour::new(&resp.node_id, NeighbourState::Active, node_addr)));
+                    wneighbour_map.insert(resp.node_id, neighbour);
+                    return Ok(())
+                }
+            }
+        }
+
     }
 
     async fn heartbeat(server: &ServerRef) -> Result<(), CommonError> {
