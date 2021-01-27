@@ -1,5 +1,4 @@
-address = "127.0.0.1:8080"
-nodes = ["127.0.0.1:8080", "127.0.0.1:8081", "127.0.0.1:8082"]
+nodes = ["127.0.0.1:8080;abc", "127.0.0.1:8081;bca", "127.0.0.1:8082;cba"]
 cluster_id = "basdewefue"
 storage_path = "/tmp/rserver0"
 node_id = "abc"

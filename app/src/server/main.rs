@@ -22,56 +22,156 @@ use std::fs;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use common_lib::client::client::Client;
 
+
+use tokio::sync::RwLock;
+use tokio::signal::unix::{signal, SignalKind};
+use tokio::time::{sleep, Duration};
+use std::collections::{HashMap, HashSet};
+
 #[derive(Deserialize)]
 struct Config {
-    address: String,
     nodes: Vec<String>,
     cluster_id: String,
     storage_path: String,
     node_id: String
 }
 
-use tokio::sync::RwLock;
-use tokio::signal::unix::{signal, SignalKind};
-use tokio::time::{sleep, Duration};
-use std::collections::HashMap;
+impl Config {
+    fn get_node_address(&self, node_id: &str) -> Option<String> {
+        for node in &self.nodes {
+            let words = node.split(";").collect::<Vec<&str>>();
+            if words.len() != 2 {
+                return None::<String>;
+            }
 
-enum NeighbourState {
+            if words[1] == node_id {
+                return Some(words[0].to_string());
+            }
+        }
+        return None::<String>;
+    }
+
+    fn check(&self) -> Result<(), CommonError> {
+        if self.node_id == "" {
+            return Err(CommonError::new("empty node_id".into()));
+        }
+
+        if self.cluster_id == "" {
+            return Err(CommonError::new("empty cluster_id".into()));
+        }
+
+        if self.storage_path == "" {
+            return Err(CommonError::new("empty storage_path".into()));
+        }
+
+        let mut addr_set = HashSet::new();
+        let mut node_id_set = HashSet::new();
+
+        for node in &self.nodes {
+            let words = node.split(";").collect::<Vec<&str>>();
+            if words.len() != 2 {
+                return Err(CommonError::new(format!("unexpected token count in string {}", node)));
+            }
+            let address = words[0];
+            let node_id = words[1];
+
+            if addr_set.contains(address) {
+                return Err(CommonError::new(format!("address {} already exists", address)));
+            }
+            addr_set.insert(address);
+
+            if node_id_set.contains(node_id) {
+                return Err(CommonError::new(format!("node_id {} already exists", node_id)));
+            }
+            node_id_set.insert(node_id);
+        }
+
+        match self.get_node_address(&self.node_id) {
+            Some(_n) => {}
+            None => {
+                return Err(CommonError::new(format!("can't find address of node_id {}", self.node_id)));
+            }
+        };
+
+        Ok(())
+    }
+}
+
+
+#[derive(Debug)]
+enum NeighState {
     Invalid,
     Active
 }
 
-struct Neighbour {
+struct Neigh {
     node_id: String,
     address: String,
-    state: NeighbourState
+    state: NeighState
 }
 
-impl Neighbour {
-    fn new(node_id: &str, state: NeighbourState, address: &str) -> Neighbour {
-        Neighbour{node_id: node_id.to_string(), state: state, address: address.to_string()}
+impl Neigh {
+    fn new(node_id: &str, state: NeighState, address: &str) -> Self {
+        Neigh{node_id: node_id.to_string(), state: state, address: address.to_string()}
     }
 
-    fn set_state(&mut self, state: NeighbourState) {
+    fn set_state(&mut self, state: NeighState) {
+        info!("node {} state {:?} -> {:?}", self.node_id, self.state, state);
         self.state = state;
     }
 }
 
-type NeighbourRef = Arc<RwLock<Neighbour>>;
+type NeighRef = Arc<RwLock<Neigh>>;
 
 struct Server {
     config: Config,
     task_count: AtomicUsize,
     shutdown: bool,
-    neighbour_map: Arc<RwLock<HashMap<String, NeighbourRef>>>
+    neigh_map: Arc<RwLock<HashMap<String, NeighRef>>>,
+    address: String
 }
 
 type ServerRef = Arc<RwLock<Server>>;
 
 impl Server {
 
-    fn new(config: Config) -> Self {
-        Server{config: config, shutdown: false, task_count: AtomicUsize::new(0), neighbour_map: Arc::new(RwLock::new(HashMap::new()))}
+    async fn new(config: Config) -> Result<Self, CommonError> {
+        let address = match config.get_node_address(&config.node_id) {
+            Some(address) => {
+                address
+            }
+            None => {
+                return Err(CommonError::new(format!("can't find self address in config")));
+            }
+        };
+
+        let neigh_map = Arc::new(RwLock::new(HashMap::new()));
+        {
+            let mut wneigh_map = neigh_map.write().await;
+            for node in &config.nodes {
+                let words = node.split(";").collect::<Vec<&str>>();
+                if words.len() != 2 {
+                    return Err(CommonError::new(format!("unexpected number of node words")));
+                }
+                let address = words[0];
+                let node_id = words[1];
+
+                if node_id != config.node_id {
+                    match wneigh_map.get(node_id) {
+                        Some(_n) => {
+                            return Err(CommonError::new(format!("neigh with node_id {} already exists", node_id)));
+                        }
+                        None => {
+                            let neigh = Arc::new(RwLock::new(Neigh::new(node_id, NeighState::Invalid, address)));
+                            wneigh_map.insert(node_id.to_string(), neigh);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(Server{config: config, shutdown: false, task_count: AtomicUsize::new(0), neigh_map: neigh_map,
+            address: address})
     }
 
     async fn echo_handler(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
@@ -102,8 +202,7 @@ impl Server {
         let mut response = Response::new(&request.req_id, "");
 
         if request.version.as_str() != "1.0.0" {
-            response.error = format!("unsupported version {}", request.version);
-            return Ok(response)
+            return Err(CommonError::new(format!("unsupported version {}", request.version)));
         }
 
         match request.path.as_str() {
@@ -112,8 +211,7 @@ impl Server {
                     Ok(v) => v,
                     Err(e) => {
                         error!("deserialize error {}", e);
-                        response.error = format!("deserialize error {}", e);
-                        return Ok(response)
+                        return Err(CommonError::new(format!("deserialize error {}", e)));
                     }
                 };
                 let resp = Server::echo_handler(server, &req).await?;
@@ -121,19 +219,16 @@ impl Server {
                     Ok(v) => v,
                     Err(e) => {
                         error!("serialize error {}", e);
-                        response.error = format!("serialize error {}", e);
-                        return Ok(response)
+                        return Err(CommonError::new(format!("serialize error {}", e)));
                     }
                 };
-                return Ok(response)
             }
             "heartbeat" => {
                 let req: HeartbeatRequest = match bincode::deserialize(&request.body) {
                     Ok(v) => v,
                     Err(e) => {
                         error!("deserialize error {}", e);
-                        response.error = format!("deserialize error {}", e);
-                        return Ok(response)
+                        return Err(CommonError::new(format!("deserialize error {}", e)));
                     }
                 };
                 let resp = Server::heartbeat_handler(server, &req).await?;
@@ -141,108 +236,99 @@ impl Server {
                     Ok(v) => v,
                     Err(e) => {
                         error!("serialize error {}", e);
-                        response.error = format!("serialize error {}", e);
-                        return Ok(response)
+                        return Err(CommonError::new(format!("serialize error {}", e)));
                     }
                 };
-                return Ok(response)
             }
             _ => {
-                response.error = format!("unsupported path {}", request.path);
-                return Ok(response)
+                return Err(CommonError::new(format!("unsupported path {}", request.path)));
             }
         }
+        Ok(response)
     }
 
     async fn handle_connection(server: &ServerRef, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
         let request = Request::recv(socket).await?;
 
-        let response = Server::dispatch_request(server, &request).await?;
-
+        let response = match Server::dispatch_request(server, &request).await {
+            Ok(v) => {
+                v
+            }
+            Err(e) => {
+                Response::new(&request.req_id, &e.message)
+            }
+        };
         Response::send(socket, &response).await?;
-
         Ok(())
     }
 
-    async fn heartbeat_to_node(server: &ServerRef, node_addr: &str) -> Result<(), CommonError> {
+    async fn heartbeat_to_node(server: &ServerRef, neigh: &NeighRef) -> Result<(), CommonError> {
         let mut client = Client::new();
 
-        info!("connecting {}", node_addr);
-        client.connect(node_addr).await?;
-        info!("connected {}", node_addr);
+        let (neigh_addr, neigh_node_id) = {
+            let rneigh = neigh.read().await;
+            (rneigh.address.clone(), rneigh.node_id.clone())
+        };
+
+        info!("connecting {}", neigh_addr);
+        client.connect(&neigh_addr).await?;
+        info!("connected {}", neigh_addr);
 
         let mut req = HeartbeatRequest::new();
-        let (cluster_id, node_id) = {
+        let (cluster_id, self_node_id) = {
             let rserver = server.read().await;
             (rserver.config.cluster_id.clone(), rserver.config.node_id.clone())
         };
         req.cluster_id = cluster_id;
-        req.node_id = node_id;
+        req.node_id = self_node_id;
 
         let resp: HeartbeatResponse = client.send("heartbeat", &req).await?;
         client.close().await?;
-        info!("addr {} cluster_id {} node_id {}", node_addr, resp.cluster_id, resp.node_id);
+        info!("addr {} cluster_id {} node_id {}", neigh_addr, resp.cluster_id, resp.node_id);
         if req.cluster_id != resp.cluster_id {
             error!("unexpected cluster_id {} vs. {}", req.cluster_id, resp.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
         }
 
-        if req.node_id == resp.node_id {
-            info!("detected self: node_id {} addr {}", req.node_id, node_addr);
-            return Ok(())
+        if neigh_node_id != resp.node_id {
+            error!("neigh_node_id {} vs. resp.node_id {}", neigh_node_id, resp.node_id);
+            return Err(CommonError::new(format!("unexpected node id")));
         }
 
-        let neighbour_map = {
-            let rserver = server.read().await;
-            rserver.neighbour_map.clone()
-        };
+        Ok(())
+    }
 
+    async fn get_neighs(&self) -> Vec<NeighRef> {
+        let mut neighs : Vec<NeighRef> = Vec::new();
         {
-            let rneighbour_map = neighbour_map.read().await;
-            match rneighbour_map.get(&resp.node_id) {
-                Some(n) => {
-                    let mut neighbour = n.write().await;
-                    neighbour.set_state(NeighbourState::Active);
-                    return Ok(())
-                }
-                None => {
+            let rneigh_map = self.neigh_map.read().await;
+            for (node_id, node) in &*rneigh_map {
+                if node_id != &self.config.node_id {
+                    neighs.push(node.clone());
                 }
             }
         }
-
-        {
-            let mut wneighbour_map = neighbour_map.write().await;
-            match wneighbour_map.get(&resp.node_id) {
-                Some(n) => {
-                    let mut neighbour = n.write().await;
-                    neighbour.set_state(NeighbourState::Active);
-                    return Ok(())
-                }
-                None => {
-                    let neighbour = Arc::new(RwLock::new(Neighbour::new(&resp.node_id, NeighbourState::Active, node_addr)));
-                    wneighbour_map.insert(resp.node_id, neighbour);
-                    return Ok(())
-                }
-            }
-        }
-
+        neighs
     }
 
     async fn heartbeat(server: &ServerRef) -> Result<(), CommonError> {
         info!("heartbeat");
 
-        let mut nodes : Vec<String> = Vec::new();
-        {
+        let neighs = {
             let rserver = server.read().await;
-            for node in &rserver.config.nodes {
-                nodes.push(node.to_string());
-            }
-        }
+            rserver.get_neighs().await
+        };
 
-        for node in nodes {
-            match Server::heartbeat_to_node(server, &node).await {
-                Ok(()) => {},
-                Err(_e) => {},
+        for neigh in neighs {
+            match Server::heartbeat_to_node(server, &neigh).await {
+                Ok(()) => {
+                    let mut wneigh = neigh.write().await;
+                    wneigh.set_state(NeighState::Active);
+                },
+                Err(_e) => {
+                    let mut wneigh = neigh.write().await;
+                    wneigh.set_state(NeighState::Invalid);
+                },
             }
         }
 
@@ -312,7 +398,7 @@ impl Server {
 
         let address = {
             let rserver = server.read().await;
-            rserver.config.address.clone()
+            rserver.address.clone()
         };
 
         let listener = match TcpListener::bind(&address).await {
@@ -409,16 +495,37 @@ async fn main() -> Result<(), Box<dyn Error>> {
     config_file.read_to_end(&mut config_data)?;
     let config: Config = toml::from_slice(&config_data)?;
 
-    info!("listening on {} clusterId {} nodes {:?} storage_path {}", config.address, config.cluster_id, config.nodes, config.storage_path);
+    info!("listening node_id {} cluster_id {} nodes {:?} storage_path {}", config.node_id, config.cluster_id, config.nodes, config.storage_path);
+    match config.check() {
+        Ok(()) => {}
+        Err(e) => {
+            error!("config check error {}", e);
+            return Err(format!("init error {}", e).into())
+        }
+    }
 
-    fs::create_dir_all(&config.storage_path)?;
+    match fs::create_dir_all(&config.storage_path) {
+        Ok(()) => {}
+        Err(e) => {
+            error!("create_dir_all {} error {}", config.storage_path, e);
+            return Err(format!("create_dir_all {} error {}", config.storage_path, e).into())
+        }
+    }
 
-    let server = Arc::new(RwLock::new(Server::new(config)));
-    match Server::run(&server).await {
+    let server = match Server::new(config).await {
+        Ok(v) => v,
+        Err(e) => {
+            error!("init error {}", e);
+            return Err(format!("init error {}", e).into())
+        }
+    };
+
+    let server_ref = Arc::new(RwLock::new(server));
+    match Server::run(&server_ref).await {
         Ok(()) => Ok(()),
         Err(e) => {
             error!("run error {}", e);
-            return Err("run error".into())
+            return Err(format!("run error {}", e).into())
         }
     }
 }
