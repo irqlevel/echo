@@ -114,16 +114,27 @@ impl Server {
             error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
         }
+        if self.config.node_id == request.node_id {
+            error!("unexpected node_id {} vs {}", request.node_id, self.config.node_id);
+            return Err(CommonError::new(format!("unexpected cluster node_id")));
+        }
+
+        info!("vote from {}", request.node_id);
+
         let mut response = VoteResponse::new();
         response.cluster_id = self.config.cluster_id.clone();
         response.node_id = self.config.node_id.clone();
 
         let mut raft_state = self.raft_state.write().await;
 
-        response.term = raft_state.get_term();
-        response.vote_granted  = false;
-
-        if request.term >= raft_state.get_term() {
+        if request.term < raft_state.get_term() {
+            response.term = raft_state.get_term();
+            response.vote_granted  = false;
+        } else {
+            if request.term > raft_state.get_term() {
+                raft_state.set_who(RaftWho::Follower);
+                raft_state.set_term(request.term);
+            }
             match &raft_state.get_voted_for() {
                 Some(node_id) =>  {
                     if request.node_id == *node_id {
@@ -146,15 +157,27 @@ impl Server {
             error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
         }
+        if self.config.node_id == request.node_id {
+            error!("unexpected node_id {} vs {}", request.node_id, self.config.node_id);
+            return Err(CommonError::new(format!("unexpected cluster node_id")));
+        }
+
         let mut response = AppendResponse::new();
         response.cluster_id = self.config.cluster_id.clone();
         response.node_id = self.config.node_id.clone();
 
+        info!("append from {}", request.node_id);
+
         let mut raft_state = self.raft_state.write().await;
         response.term = raft_state.get_term();
-        if raft_state.get_term() <= request.term {
+        if request.term > raft_state.get_term() {
             raft_state.set_who(RaftWho::Follower);
             raft_state.set_term(request.term);
+        } else if request.term < raft_state.get_term() {
+            error!("unexpected term {} vs {}", request.term, raft_state.get_term());
+            return Err(CommonError::new(format!("unexpected term")));
+        } else {
+            raft_state.reset_election();
         }
         Ok(response)
     }
@@ -276,8 +299,14 @@ impl Server {
                         }
                     };
 
-                    if resp.term > current_term {
-                        let mut raft_state = self.raft_state.write().await;
+                    if resp.cluster_id != self.config.cluster_id ||
+                        resp.node_id != neigh.node_id {
+                        error!("unexpected response cluster_id {} node_id{}", resp.cluster_id, resp.node_id);
+                        continue;
+                    }
+
+                    let mut raft_state = self.raft_state.write().await;
+                    if resp.term > raft_state.get_term() {
                         raft_state.set_term(resp.term);
                         raft_state.set_who(RaftWho::Follower);
                     } else {
@@ -310,12 +339,18 @@ impl Server {
                         Ok(v) => v,
                         Err(e) => {
                             error!("append request failure {}", e);
-                            return Err(e)
+                            continue;
                         }
                     };
 
-                    if resp.term > current_term {
-                        let mut raft_state = self.raft_state.write().await;
+                    if resp.cluster_id != self.config.cluster_id ||
+                        resp.node_id != neigh.node_id {
+                        error!("unexpected response cluster_id {} node_id{}", resp.cluster_id, resp.node_id);
+                        continue;
+                    }
+
+                    let mut raft_state = self.raft_state.write().await;
+                    if resp.term > raft_state.get_term() {
                         raft_state.set_term(resp.term);
                         raft_state.set_who(RaftWho::Follower);
                         break;
