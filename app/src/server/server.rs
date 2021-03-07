@@ -6,7 +6,7 @@ extern crate common_lib;
 use tokio::net::TcpListener;
 
 use common_lib::error::error::CommonError;
-use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, HeartbeatRequest, HeartbeatResponse};
+use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, VoteRequest, VoteResponse};
 
 use std::sync::Arc;
 use log::{error, info};
@@ -18,34 +18,37 @@ use tokio::sync::RwLock;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
+use chrono::{Utc};
+use rand::Rng;
 
 use crate::config::config::Config;
-use crate::neigh::neigh::NeighState;
 use crate::neigh::neigh::NeighRef;
 use crate::neigh::neigh::Neigh;
-use crate::raft_state::raft_state::RaftState;
+use crate::raft_state::raft_state::{RaftState, RaftWho};
 
 pub struct Server {
     config: Config,
     task_count: AtomicUsize,
-    shutdown: bool,
-    neigh_map: Arc<RwLock<HashMap<String, NeighRef>>>,
+    shutdown: RwLock<bool>,
+    neigh_map: HashMap<String, NeighRef>,
     address: String,
-    raft_state: RaftState
+    raft_state: RwLock<RaftState>
 }
 
-type ServerRef = Arc<RwLock<Server>>;
+type ServerRef = Arc<Server>;
 
 impl Server {
 
     const RAFT_STATE_FILE_NAME: &'static str = "raft_state";
+    const TICK_TIMEOUT_MILLIS: u64 = 1000;
+    const ELECTION_TIMEOUT_MILLIS: i64 = 10000;
+    const ELECTION_TIMEOUT_RANDOM_PART_MILLIS: i64 = 300;
 
-    async fn get_neighs(&self) -> Vec<NeighRef> {
+    fn get_neighs(&self) -> Vec<NeighRef> {
         let mut neighs : Vec<NeighRef> = Vec::new();
         {
-            let rneigh_map = self.neigh_map.read().await;
-            for (node_id, node) in &*rneigh_map {
-                if node_id != &self.config.node_id {
+            for (node_id, node) in &self.neigh_map {
+                if *node_id != self.config.node_id {
                     neighs.push(node.clone());
                 }
             }
@@ -55,13 +58,18 @@ impl Server {
 
     async fn save_state(&self) -> Result<(), CommonError> {
         let raft_state_file_path = self.config.get_sub_storage_path(&Server::RAFT_STATE_FILE_NAME)?;
-        self.raft_state.to_file(&raft_state_file_path).await?;
+        let raft_state = self.raft_state.read().await;
+        raft_state.to_file(&raft_state_file_path).await?;
         Ok(())
     }
 
     async fn load_state(&mut self) -> Result<(), CommonError> {
         let raft_state_file_path = self.config.get_sub_storage_path(&Server::RAFT_STATE_FILE_NAME)?;
-        self.raft_state = RaftState::from_file(&raft_state_file_path).await?;
+        let mut raft_state = self.raft_state.write().await;
+        let raft_state_from_file = RaftState::from_file(&raft_state_file_path).await?;
+        *raft_state = raft_state_from_file;
+        raft_state.who = RaftWho::Follower;
+        raft_state.last_election = Utc::now().timestamp_millis();
         Ok(())
     }
 
@@ -75,15 +83,13 @@ impl Server {
             }
         };
 
-        let neigh_map = Arc::new(RwLock::new(HashMap::new()));
+        let mut neigh_map = HashMap::new();
         {
-            let mut wneigh_map = neigh_map.write().await;
-
             match config.get_node_map() {
                 Ok(node_map) => {
                     for (node_id, address) in node_map.into_iter() {
-                        let neigh = Arc::new(RwLock::new(Neigh::new(&node_id, NeighState::Invalid, &address)));
-                        wneigh_map.insert(node_id.to_string(), neigh);
+                        let neigh = Arc::new(Neigh::new(&node_id, &address));
+                        neigh_map.insert(node_id.to_string(), neigh);
                     }
                 },
                 Err(e) => {
@@ -92,33 +98,26 @@ impl Server {
             }
         }
 
-        let mut server = Server{config: config, shutdown: false, task_count: AtomicUsize::new(0), neigh_map: neigh_map,
-            address: address, raft_state: RaftState::new()};
+        let mut server = Server{config: config, shutdown: RwLock::new(false), task_count: AtomicUsize::new(0), neigh_map: neigh_map,
+            address: address, raft_state: RwLock::new(RaftState::new())};
         server.load_state().await?;
         Ok(server)
     }
 
-    async fn echo_handler(_server: &ServerRef, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
+    async fn echo_handler(self: &Server, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
         let mut response = EchoResponse::new();
         response.message = request.message.clone();
         Ok(response)
     }
 
-    async fn heartbeat_handler(server: &ServerRef, request: &HeartbeatRequest) -> Result<HeartbeatResponse, CommonError> {
-        {
-            let rserver = server.read().await;
-            if rserver.config.cluster_id != request.cluster_id {
-                error!("unexpected cluster_id {} vs {}", request.cluster_id, rserver.config.cluster_id);
-                return Err(CommonError::new(format!("unexpected cluster id")));
-            }
+    async fn vote_handler(self: &Server, request: &VoteRequest) -> Result<VoteResponse, CommonError> {
+        if self.config.cluster_id != request.cluster_id {
+            error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
+            return Err(CommonError::new(format!("unexpected cluster id")));
         }
-        let mut response = HeartbeatResponse::new();
-        let (cluster_id, node_id) = {
-            let rserver = server.read().await;
-            (rserver.config.cluster_id.clone(), rserver.config.node_id.clone())
-        };
-        response.cluster_id = cluster_id;
-        response.node_id = node_id;
+        let mut response = VoteResponse::new();
+        response.cluster_id = self.config.cluster_id.clone();
+        response.node_id = self.config.node_id.clone();
         Ok(response)
     }
 
@@ -150,21 +149,21 @@ impl Server {
         Ok(bytes)
     }
 
-    async fn dispatch_request(server: &ServerRef, request: &Request) -> Result<Response, CommonError> {
+    async fn dispatch_request(self: &Server, request: &Request) -> Result<Response, CommonError> {
         if request.version.as_str() != "1.0.0" {
             return Err(CommonError::new(format!("unsupported version {}", request.version)));
         }
 
         let mut response = Response::new(&request.req_id, "");
         match request.path.as_str() {
-            "echo" => {
+            "/echo" => {
                 let req: EchoRequest = Server::deserialize_request(&request.body)?;
-                let resp = Server::echo_handler(server, &req).await?;
+                let resp = self.echo_handler(&req).await?;
                 response.body = Server::serialize_response(&resp)?;
             }
-            "heartbeat" => {
-                let req: HeartbeatRequest = Server::deserialize_request(&request.body)?;
-                let resp = Server::heartbeat_handler(server, &req).await?;
+            "/vote" => {
+                let req: VoteRequest = Server::deserialize_request(&request.body)?;
+                let resp = self.vote_handler(&req).await?;
                 response.body = Server::serialize_response(&resp)?;
             }
             _ => {
@@ -174,10 +173,9 @@ impl Server {
         Ok(response)
     }
 
-    async fn handle_connection(server: &ServerRef, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
+    async fn handle_connection(self: &Server, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
         let request = Request::recv(socket).await?;
-
-        let response = match Server::dispatch_request(server, &request).await {
+        let response = match self.dispatch_request(&request).await {
             Ok(v) => {
                 v
             }
@@ -189,95 +187,86 @@ impl Server {
         Ok(())
     }
 
-    async fn heartbeat_to_node(server: &ServerRef, neigh: &NeighRef) -> Result<(), CommonError> {
-        let mut req = HeartbeatRequest::new();
-        let (cluster_id, self_node_id) = {
-            let rserver = server.read().await;
-            (rserver.config.cluster_id.clone(), rserver.config.node_id.clone())
-        };
-        req.cluster_id = cluster_id;
-        req.node_id = self_node_id;
+    async fn tick(self: &Server) -> Result<(), CommonError> {
+        info!("tick");
+        {
+            let mut raft_state = self.raft_state.write().await;
+            match raft_state.who {
+                RaftWho::Follower => {
+                    let last_election = raft_state.last_election;
+                    let now = Utc::now().timestamp_millis();
 
-        let rneigh = neigh.read().await;
-        let resp: HeartbeatResponse = rneigh.send("heartbeat", &req).await?;
-        info!("addr {} cluster_id {} node_id {}", rneigh.address, resp.cluster_id, resp.node_id);
-        if req.cluster_id != resp.cluster_id {
-            error!("unexpected cluster_id {} vs. {}", req.cluster_id, resp.cluster_id);
-            return Err(CommonError::new(format!("unexpected cluster id")));
-        }
-
-        if rneigh.node_id != resp.node_id {
-            error!("neigh_node_id {} vs. resp.node_id {}", rneigh.node_id, resp.node_id);
-            return Err(CommonError::new(format!("unexpected node id")));
-        }
-
-        Ok(())
-    }
-
-    async fn heartbeat(server: &ServerRef) -> Result<(), CommonError> {
-        info!("heartbeat");
-
-        let neighs = {
-            let rserver = server.read().await;
-            rserver.get_neighs().await
-        };
-
-        for neigh in neighs {
-            match Server::heartbeat_to_node(server, &neigh).await {
-                Ok(()) => {
-                    let mut wneigh = neigh.write().await;
-                    wneigh.set_state(NeighState::Active);
-                },
-                Err(_e) => {
-                    let mut wneigh = neigh.write().await;
-                    wneigh.set_state(NeighState::Invalid);
-                },
+                    if now > last_election && ((now - last_election) > Server::ELECTION_TIMEOUT_MILLIS) {
+                        let mut rng = rand::thread_rng();
+                        raft_state.last_election = now + rng.gen_range(0..Server::ELECTION_TIMEOUT_RANDOM_PART_MILLIS);
+                        raft_state.who = RaftWho::Candidate;
+                        raft_state.current_term += 1;
+                        raft_state.voted_for = Some(self.config.node_id.clone());
+                    }
+                }
+                _ => {}
             }
         }
 
-        {
-            let mut wserver = server.write().await;
-            wserver.raft_state.term += 1;
-        }
+        let (who, current_term) = {
+            let raft_state = self.raft_state.read().await;
+            (raft_state.who, raft_state.current_term)
+        };
 
-        {
-            let rserver = server.read().await;
-            match rserver.save_state().await {
-                Ok(_) => {},
-                Err(e) => {
-                    error!("save_state error {}", e);
+        match who {
+            RaftWho::Candidate => {
+
+                for neigh in self.get_neighs() {
+
+                    let mut req = VoteRequest::new();
+
+                    req.cluster_id = self.config.cluster_id.clone();
+                    req.node_id = self.config.node_id.clone();
+                    req.term = current_term;
+
+                    let _resp: VoteResponse = match neigh.send("/vote", &req).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("vote request failure {}", e);
+                            return Err(e)
+                        }
+                    };
+
                 }
             }
+            _ => {}
         }
-        info!("heartbeat done");
+
+        match self.save_state().await {
+            Ok(_) => {},
+            Err(e) => {
+                error!("save_state error {}", e);
+            }
+        }
+
+        info!("tick done");
         Ok(())
     }
 
-    async fn shutdown(server: &ServerRef) {
+    async fn shutdown(self: &Server) {
         info!("shutdowning");
 
-        {
-            let mut wserver = server.write().await;
-            wserver.shutdown = true;
-        }
+        self.set_shutdown().await;
 
         loop {
-            let pending_tasks = Server::get_pending_tasks(server).await;
+            let pending_tasks = self.get_pending_tasks().await;
             if pending_tasks == 0 {
                 break;
             }
 
             info!("pending tasks {}", pending_tasks);
-            sleep(Duration::from_millis(1000)).await;
+            sleep(Duration::from_millis(Server::TICK_TIMEOUT_MILLIS)).await;
         }
 
-        {
-            let wserver = server.write().await;
-            match wserver.save_state().await {
-                Ok(_) => {},
-                Err(e) => {
-                    error!("save state error {}", e);
-                }
+        match self.save_state().await {
+            Ok(_) => {},
+            Err(e) => {
+                error!("save state error {}", e);
             }
         }
 
@@ -285,28 +274,30 @@ impl Server {
         std::process::exit(0);
     }
 
-    async fn get_pending_tasks(server: &ServerRef) -> usize {
-        let rserver = server.read().await;
-        return rserver.task_count.fetch_add(0, Ordering::SeqCst);
+    async fn get_pending_tasks(self: &Server) -> usize {
+        return self.task_count.fetch_add(0, Ordering::SeqCst);
     }
 
-    async fn inc_pending_tasks(server: &ServerRef) {
-        let rserver = server.read().await;
-        rserver.task_count.fetch_add(1, Ordering::SeqCst);
+    async fn inc_pending_tasks(self: &Server) {
+        self.task_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn dec_pending_tasks(server: &ServerRef) {
-        let rserver = server.read().await;
-        rserver.task_count.fetch_sub(1, Ordering::SeqCst);
+    async fn dec_pending_tasks(self: &Server) {
+        self.task_count.fetch_sub(1, Ordering::SeqCst);
     }
 
-    async fn get_shutdown(server: &ServerRef) -> bool {
-        let rserver = server.read().await;
-        info!("shutdown {}", rserver.shutdown);
-        rserver.shutdown
+    async fn get_shutdown(self: &Server) -> bool {
+        let rshutdown = self.shutdown.read().await;
+        info!("shutdown {}", *rshutdown);
+        *rshutdown
     }
 
-    pub async fn run(server: &ServerRef) -> Result<(), CommonError> {
+    async fn set_shutdown(self: &Server) {
+        let mut wshutdown = self.shutdown.write().await;
+        *wshutdown = true;
+    }
+
+    pub async fn run(self: &Server, server: &ServerRef) -> Result<(), CommonError> {
         let mut sig_term_stream = match signal(SignalKind::terminate()) {
             Ok(v) => v,
             Err(e) => {
@@ -323,41 +314,36 @@ impl Server {
             }
         };
 
-        let address = {
-            let rserver = server.read().await;
-            rserver.address.clone()
-        };
-
-        let listener = match TcpListener::bind(&address).await {
+        let listener = match TcpListener::bind(&self.address).await {
             Ok(v) => v,
             Err(e) => {
-                error!("bind {} error {}", address, e);
+                error!("bind {} error {}", self.address, e);
                 return Err(CommonError::new(format!("bind error")));
             }
         };
 
         let server_ref = server.clone();
-        Server::inc_pending_tasks(&server_ref).await;
+        self.inc_pending_tasks().await;
         tokio::spawn(async move {
             loop {
-                match Server::heartbeat(&server_ref).await {
+                match server_ref.tick().await {
                     Ok(()) => {},
                     Err(e) => {
-                        error!("heartbeat error {}", e);
+                        error!("tick error {}", e);
                     }
                 }
 
-                if Server::get_shutdown(&server_ref).await {
+                if server_ref.get_shutdown().await {
                     break;
                 }
 
                 sleep(Duration::from_millis(1000)).await;
 
-                if Server::get_shutdown(&server_ref).await {
+                if server_ref.get_shutdown().await {
                     break;
                 }
             }
-            Server::dec_pending_tasks(&server_ref).await;
+            server_ref.dec_pending_tasks().await;
         });
 
         loop {
@@ -367,15 +353,15 @@ impl Server {
                         Ok(connection) => {
                             let mut socket = connection.0;
                             let server_ref = server.clone();
-                            Server::inc_pending_tasks(server).await;
+                            self.inc_pending_tasks().await;
                             tokio::spawn(async move {
-                                match Server::handle_connection(&server_ref, &mut socket).await {
+                                match server_ref.handle_connection(&mut socket).await {
                                     Ok(()) => {},
                                     Err(e) => {
                                         error!("handle_connection error {}", e);
                                     }
                                 }
-                                Server::dec_pending_tasks(&server_ref).await;
+                                server_ref.dec_pending_tasks().await;
                             });        
                         }
                         Err(e) => {
@@ -386,14 +372,12 @@ impl Server {
 
                 _sig_term_result = sig_term_stream.recv() => {
                     info!("received sig term");
-                    let server_ref = server.clone();
-                    Server::shutdown(&server_ref).await;
+                    self.shutdown().await;
                 }
 
                 _sig_int_result = sig_int_stream.recv() => {
                     info!("received sig int");
-                    let server_ref = server.clone();
-                    Server::shutdown(&server_ref).await;
+                    self.shutdown().await;
                 }
             }
         }

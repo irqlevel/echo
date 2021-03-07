@@ -13,8 +13,6 @@ use std::fs::File;
 use std::io::Read;
 use std::fs;
 
-use tokio::sync::RwLock;
-
 pub mod config;
 pub mod server;
 pub mod neigh;
@@ -70,8 +68,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         }
     };
 
-    let server_ref = Arc::new(RwLock::new(server));
-    match Server::run(&server_ref).await {
+    let server_ref = Arc::new(server);
+    match server_ref.run(&server_ref).await {
         Ok(()) => Ok(()),
         Err(e) => {
             error!("run error {}", e);

@@ -260,4 +260,35 @@ impl HeartbeatResponse {
     }
 }
 
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct VoteRequest {
+    pub cluster_id: String,
+    pub node_id: String,
+    pub term: u64,
+    pub last_log_index: usize,
+    pub last_log_term: u64
+}
+
+impl VoteRequest {
+    pub fn new() -> Self {
+        VoteRequest{cluster_id: "".to_string(), node_id: "".to_string(), term: 0, last_log_index: 0, last_log_term: 0}
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct VoteResponse {
+    pub cluster_id: String,
+    pub node_id: String,
+    pub term: u64,
+    pub vote_granted: bool
+}
+
+impl VoteResponse {
+    pub fn new() -> Self {
+        VoteResponse{cluster_id: "".to_string(), node_id: "".to_string(), term: 0, vote_granted: false}
+    }
+}
+
+
 }

@@ -10,15 +10,66 @@ use log::error;
 use serde_derive::{Serialize, Deserialize};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use std::io::ErrorKind;
+use std::collections::HashMap;
+use chrono::Utc;
+
+type RaftTerm = u64;
+type RaftLogIndex = usize;
+type RaftNodeId = String;
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct RafCommand {
+    pub id: String
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct RaftLogEntry {
+    pub command: RafCommand,
+    pub term: RaftTerm
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug, Copy, Clone)]
+pub enum RaftWho {
+    Follower,
+    Candidate,
+    Leader
+}
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
 pub struct RaftState {
-    pub term: u64
+    //Persistent state on all servers:
+    //(Updated on stable storage before responding to RPCs)
+    pub current_term: RaftTerm, //latest term server has seen (initialized to 0n first boot, increases monotonically)
+    pub voted_for: Option<RaftNodeId>, //candidateId that received vote in current term (or null if none)
+    pub log: Vec<RaftLogEntry>, /*log entries; each entry contains command
+                                for state machine, and term when entry
+                                was received by leader (first index is 1)*/
+
+    //Volatile state on all servers:
+    pub commit_index: RaftLogIndex, /*index of highest log entry known to be
+                            committed (initialized to 0, increases
+                            monotonically)*/
+    pub last_applied: RaftLogIndex, /*index of highest log entry applied to state machine (initialized to 0, increases
+                            monotonically)*/
+
+    //Volatile state on leaders:
+    //(Reinitialized after election)
+    pub next_index: HashMap<RaftNodeId, RaftLogIndex>, /*for each server, index of the next log entry
+                                            to send to that server (initialized to leader
+                                            last log index + 1)*/
+    pub match_index: HashMap<RaftNodeId, RaftLogIndex>, /*for each server, index of highest log entry
+                                            known to be replicated on server
+                                            (initialized to 0, increases monotonically)*/
+
+
+    pub who: RaftWho,
+    pub last_election: i64
 }
 
 impl RaftState {
     pub fn new() -> Self {
-        Self{term: 0}
+        Self{current_term: 0, voted_for: None, log: Vec::new(), commit_index:0, last_applied: 0,
+            next_index: HashMap::new(), match_index: HashMap::new(), who: RaftWho::Follower, last_election: Utc::now().timestamp_millis()}
     }
 
     pub async fn to_file(&self, file_path: &str) -> Result<(), CommonError> {
