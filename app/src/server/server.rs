@@ -257,30 +257,27 @@ impl Server {
 
     async fn tick(&self) -> Result<(), CommonError> {
         info!("tick");
-        {
-            let mut raft_state = self.raft_state.write().await;
-            match raft_state.get_who() {
-                RaftWho::Follower => {
-                    let last_election = raft_state.last_election;
-                    let now = Utc::now().timestamp_millis();
 
-                    if now > last_election && ((now - last_election) > Server::ELECTION_TIMEOUT_MILLIS) {
+        let (who, current_term, last_election) = {
+            let raft_state = self.raft_state.read().await;
+            (raft_state.get_who(), raft_state.get_term(), raft_state.last_election)
+        };
+
+        match who {
+            RaftWho::Follower => {
+                let now = Utc::now().timestamp_millis();
+                if now > last_election && ((now - last_election) > Server::ELECTION_TIMEOUT_MILLIS) {
+                    let mut raft_state = self.raft_state.write().await;
+                    let now = Utc::now().timestamp_millis();
+                    if now > raft_state.last_election && ((now - raft_state.last_election) > Server::ELECTION_TIMEOUT_MILLIS) &&
+                        raft_state.get_who() == RaftWho::Follower {
                         raft_state.set_who(RaftWho::Candidate);
                         let current_term = raft_state.get_term();
                         raft_state.set_term(current_term + 1);
                         raft_state.set_voted_for(Some(self.config.node_id.clone()));
                     }
                 }
-                _ => {}
             }
-        }
-
-        let (who, current_term) = {
-            let raft_state = self.raft_state.read().await;
-            (raft_state.get_who(), raft_state.get_term())
-        };
-
-        match who {
             RaftWho::Candidate => {
                 let mut votes: usize = 0;
                 let votes_need = self.neigh_map.len()/2 + 1;
@@ -359,7 +356,6 @@ impl Server {
                     }
                 }
             }
-            _ => {}
         }
 
         match self.save_state().await {
