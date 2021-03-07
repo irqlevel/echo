@@ -6,7 +6,7 @@ extern crate common_lib;
 use tokio::net::TcpListener;
 
 use common_lib::error::error::CommonError;
-use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, VoteRequest, VoteResponse};
+use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, VoteRequest, VoteResponse, AppendRequest, AppendResponse};
 
 use std::sync::Arc;
 use log::{error, info};
@@ -19,7 +19,6 @@ use tokio::signal::unix::{signal, SignalKind};
 use tokio::time::{sleep, Duration};
 use std::collections::HashMap;
 use chrono::{Utc};
-use rand::Rng;
 
 use crate::config::config::Config;
 use crate::neigh::neigh::NeighRef;
@@ -42,7 +41,6 @@ impl Server {
     const RAFT_STATE_FILE_NAME: &'static str = "raft_state";
     const TICK_TIMEOUT_MILLIS: u64 = 1000;
     const ELECTION_TIMEOUT_MILLIS: i64 = 10000;
-    const ELECTION_TIMEOUT_RANDOM_PART_MILLIS: i64 = 300;
 
     fn get_neighs(&self) -> Vec<NeighRef> {
         let mut neighs : Vec<NeighRef> = Vec::new();
@@ -68,8 +66,9 @@ impl Server {
         let mut raft_state = self.raft_state.write().await;
         let raft_state_from_file = RaftState::from_file(&raft_state_file_path).await?;
         *raft_state = raft_state_from_file;
-        raft_state.who = RaftWho::Follower;
+        raft_state.set_who(RaftWho::Follower);
         raft_state.last_election = Utc::now().timestamp_millis();
+        raft_state.set_voted_for(None);
         Ok(())
     }
 
@@ -104,13 +103,13 @@ impl Server {
         Ok(server)
     }
 
-    async fn echo_handler(self: &Server, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
+    async fn echo_handler(&self, request: &EchoRequest) -> Result<EchoResponse, CommonError> {
         let mut response = EchoResponse::new();
         response.message = request.message.clone();
         Ok(response)
     }
 
-    async fn vote_handler(self: &Server, request: &VoteRequest) -> Result<VoteResponse, CommonError> {
+    async fn vote_handler(&self, request: &VoteRequest) -> Result<VoteResponse, CommonError> {
         if self.config.cluster_id != request.cluster_id {
             error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
@@ -118,6 +117,45 @@ impl Server {
         let mut response = VoteResponse::new();
         response.cluster_id = self.config.cluster_id.clone();
         response.node_id = self.config.node_id.clone();
+
+        let mut raft_state = self.raft_state.write().await;
+
+        response.term = raft_state.get_term();
+        response.vote_granted  = false;
+
+        if request.term >= raft_state.get_term() {
+            match &raft_state.get_voted_for() {
+                Some(node_id) =>  {
+                    if request.node_id == *node_id {
+                        response.vote_granted = true;
+                    } else {
+                        response.vote_granted = false;
+                    }
+                }
+                None => {
+                    raft_state.set_voted_for(Some(request.node_id.clone()));
+                    response.vote_granted = true;
+                }
+            }
+        }
+        Ok(response)
+    }
+
+    async fn append_handler(&self, request: &AppendRequest) -> Result<AppendResponse, CommonError> {
+        if self.config.cluster_id != request.cluster_id {
+            error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
+            return Err(CommonError::new(format!("unexpected cluster id")));
+        }
+        let mut response = AppendResponse::new();
+        response.cluster_id = self.config.cluster_id.clone();
+        response.node_id = self.config.node_id.clone();
+
+        let mut raft_state = self.raft_state.write().await;
+        response.term = raft_state.get_term();
+        if raft_state.get_term() <= request.term {
+            raft_state.set_who(RaftWho::Follower);
+            raft_state.set_term(request.term);
+        }
         Ok(response)
     }
 
@@ -149,7 +187,7 @@ impl Server {
         Ok(bytes)
     }
 
-    async fn dispatch_request(self: &Server, request: &Request) -> Result<Response, CommonError> {
+    async fn dispatch_request(&self, request: &Request) -> Result<Response, CommonError> {
         if request.version.as_str() != "1.0.0" {
             return Err(CommonError::new(format!("unsupported version {}", request.version)));
         }
@@ -166,6 +204,11 @@ impl Server {
                 let resp = self.vote_handler(&req).await?;
                 response.body = Server::serialize_response(&resp)?;
             }
+            "/append" => {
+                let req: AppendRequest = Server::deserialize_request(&request.body)?;
+                let resp = self.append_handler(&req).await?;
+                response.body = Server::serialize_response(&resp)?;
+            }
             _ => {
                 return Err(CommonError::new(format!("unsupported path {}", request.path)));
             }
@@ -173,7 +216,7 @@ impl Server {
         Ok(response)
     }
 
-    async fn handle_connection(self: &Server, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
+    async fn handle_connection(&self, socket: &mut tokio::net::TcpStream) -> Result<(), CommonError> {
         let request = Request::recv(socket).await?;
         let response = match self.dispatch_request(&request).await {
             Ok(v) => {
@@ -187,21 +230,20 @@ impl Server {
         Ok(())
     }
 
-    async fn tick(self: &Server) -> Result<(), CommonError> {
+    async fn tick(&self) -> Result<(), CommonError> {
         info!("tick");
         {
             let mut raft_state = self.raft_state.write().await;
-            match raft_state.who {
+            match raft_state.get_who() {
                 RaftWho::Follower => {
                     let last_election = raft_state.last_election;
                     let now = Utc::now().timestamp_millis();
 
                     if now > last_election && ((now - last_election) > Server::ELECTION_TIMEOUT_MILLIS) {
-                        let mut rng = rand::thread_rng();
-                        raft_state.last_election = now + rng.gen_range(0..Server::ELECTION_TIMEOUT_RANDOM_PART_MILLIS);
-                        raft_state.who = RaftWho::Candidate;
-                        raft_state.current_term += 1;
-                        raft_state.voted_for = Some(self.config.node_id.clone());
+                        raft_state.set_who(RaftWho::Candidate);
+                        let current_term = raft_state.get_term();
+                        raft_state.set_term(current_term + 1);
+                        raft_state.set_voted_for(Some(self.config.node_id.clone()));
                     }
                 }
                 _ => {}
@@ -210,11 +252,13 @@ impl Server {
 
         let (who, current_term) = {
             let raft_state = self.raft_state.read().await;
-            (raft_state.who, raft_state.current_term)
+            (raft_state.get_who(), raft_state.get_term())
         };
 
         match who {
             RaftWho::Candidate => {
+                let mut votes: usize = 0;
+                let votes_need = self.neigh_map.len()/2 + 1;
 
                 for neigh in self.get_neighs() {
 
@@ -224,14 +268,58 @@ impl Server {
                     req.node_id = self.config.node_id.clone();
                     req.term = current_term;
 
-                    let _resp: VoteResponse = match neigh.send("/vote", &req).await {
-                        Ok(v) => v,
+                    let resp: VoteResponse = match neigh.send("/vote", &req).await {
+                        Ok(_resp) => {_resp},
                         Err(e) => {
                             error!("vote request failure {}", e);
+                            continue;
+                        }
+                    };
+
+                    if resp.term > current_term {
+                        let mut raft_state = self.raft_state.write().await;
+                        raft_state.set_term(resp.term);
+                        raft_state.set_who(RaftWho::Follower);
+                    } else {
+                        if resp.vote_granted {
+                            info!("vote from {} granted for {}", resp.node_id, self.config.node_id);
+                            votes+= 1;
+                        }
+                    }
+                }
+
+                info!("votes {} need {}", votes, votes_need);
+
+                let mut raft_state = self.raft_state.write().await;
+                if votes >= votes_need && raft_state.get_who() == RaftWho::Candidate && raft_state.get_term() == current_term {
+                    raft_state.set_who(RaftWho::Leader);
+                } else {
+                    raft_state.set_who(RaftWho::Follower);
+                }
+            }
+            RaftWho::Leader => {
+                for neigh in self.get_neighs() {
+
+                    let mut req = AppendRequest::new();
+
+                    req.cluster_id = self.config.cluster_id.clone();
+                    req.node_id = self.config.node_id.clone();
+                    req.term = current_term;
+
+                    let resp: AppendResponse = match neigh.send("/append", &req).await {
+                        Ok(v) => v,
+                        Err(e) => {
+                            error!("append request failure {}", e);
                             return Err(e)
                         }
                     };
 
+                    if resp.term > current_term {
+                        let mut raft_state = self.raft_state.write().await;
+                        raft_state.set_term(resp.term);
+                        raft_state.set_who(RaftWho::Follower);
+                        break;
+                    }
                 }
             }
             _ => {}
@@ -248,7 +336,7 @@ impl Server {
         Ok(())
     }
 
-    async fn shutdown(self: &Server) {
+    async fn shutdown(&self) {
         info!("shutdowning");
 
         self.set_shutdown().await;
@@ -274,30 +362,30 @@ impl Server {
         std::process::exit(0);
     }
 
-    async fn get_pending_tasks(self: &Server) -> usize {
+    async fn get_pending_tasks(&self) -> usize {
         return self.task_count.fetch_add(0, Ordering::SeqCst);
     }
 
-    async fn inc_pending_tasks(self: &Server) {
+    async fn inc_pending_tasks(&self) {
         self.task_count.fetch_add(1, Ordering::SeqCst);
     }
 
-    async fn dec_pending_tasks(self: &Server) {
+    async fn dec_pending_tasks(&self) {
         self.task_count.fetch_sub(1, Ordering::SeqCst);
     }
 
-    async fn get_shutdown(self: &Server) -> bool {
+    async fn get_shutdown(&self) -> bool {
         let rshutdown = self.shutdown.read().await;
         info!("shutdown {}", *rshutdown);
         *rshutdown
     }
 
-    async fn set_shutdown(self: &Server) {
+    async fn set_shutdown(&self) {
         let mut wshutdown = self.shutdown.write().await;
         *wshutdown = true;
     }
 
-    pub async fn run(self: &Server, server: &ServerRef) -> Result<(), CommonError> {
+    pub async fn run(&self, server: &ServerRef) -> Result<(), CommonError> {
         let mut sig_term_stream = match signal(SignalKind::terminate()) {
             Ok(v) => v,
             Err(e) => {

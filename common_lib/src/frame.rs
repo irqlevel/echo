@@ -290,5 +290,30 @@ impl VoteResponse {
     }
 }
 
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct AppendRequest {
+    pub cluster_id: String,
+    pub node_id: String,
+    pub term: u64
+}
+
+impl AppendRequest {
+    pub fn new() -> Self {
+        AppendRequest{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct AppendResponse {
+    pub cluster_id: String,
+    pub node_id: String,
+    pub term: u64
+}
+
+impl AppendResponse {
+    pub fn new() -> Self {
+        AppendResponse{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
+    }
+}
 
 }

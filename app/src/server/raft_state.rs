@@ -5,13 +5,14 @@ extern crate common_lib;
 
 use common_lib::error::error::CommonError;
 
-use log::error;
+use log::{error, info};
 
 use serde_derive::{Serialize, Deserialize};
 use tokio::io::{AsyncWriteExt, AsyncReadExt};
 use std::io::ErrorKind;
 use std::collections::HashMap;
 use chrono::Utc;
+use rand::Rng;
 
 type RaftTerm = u64;
 type RaftLogIndex = usize;
@@ -39,8 +40,8 @@ pub enum RaftWho {
 pub struct RaftState {
     //Persistent state on all servers:
     //(Updated on stable storage before responding to RPCs)
-    pub current_term: RaftTerm, //latest term server has seen (initialized to 0n first boot, increases monotonically)
-    pub voted_for: Option<RaftNodeId>, //candidateId that received vote in current term (or null if none)
+    term: RaftTerm, //latest term server has seen (initialized to 0n first boot, increases monotonically)
+    voted_for: Option<RaftNodeId>, //candidateId that received vote in current term (or null if none)
     pub log: Vec<RaftLogEntry>, /*log entries; each entry contains command
                                 for state machine, and term when entry
                                 was received by leader (first index is 1)*/
@@ -62,13 +63,13 @@ pub struct RaftState {
                                             (initialized to 0, increases monotonically)*/
 
 
-    pub who: RaftWho,
+    who: RaftWho,
     pub last_election: i64
 }
 
 impl RaftState {
     pub fn new() -> Self {
-        Self{current_term: 0, voted_for: None, log: Vec::new(), commit_index:0, last_applied: 0,
+        Self{term: 0, voted_for: None, log: Vec::new(), commit_index:0, last_applied: 0,
             next_index: HashMap::new(), match_index: HashMap::new(), who: RaftWho::Follower, last_election: Utc::now().timestamp_millis()}
     }
 
@@ -144,6 +145,51 @@ impl RaftState {
             }
         };
         Ok(state)
+    }
+
+    pub fn set_who(&mut self, who: RaftWho) {
+        info!("raft: set who {:?} -> {:?}", self.who, who);
+        self.who = who;
+        self.reset_election()
+    }
+
+    pub fn set_term(&mut self, term: RaftTerm) {
+        info!("raft: set term {} -> {}", self.term, term);
+        self.term = term;
+    }
+
+    pub fn set_voted_for(&mut self, voted_for: Option<RaftNodeId>) {
+        info!("raft: set voted_for {:?}", voted_for);
+        self.voted_for = voted_for;
+    }
+
+    pub fn get_who(&self) -> RaftWho {
+        info!("raft: get who {:?}", self.who);
+        self.who
+    }
+
+    pub fn get_term(&self) -> RaftTerm {
+        info!("raft: get term {}", self.term);
+        self.term
+    }
+
+    pub fn get_voted_for(&self) -> Option<RaftNodeId> {
+        let voted_for = match &self.voted_for {
+            Some(v) => {
+                Some(v.clone())
+            }
+            None => None
+        };
+        info!("raft: get voted_for {:?}", voted_for);
+        voted_for
+    }
+
+    pub fn reset_election(&mut self) {
+        let mut rng = rand::thread_rng();
+        let now = Utc::now().timestamp_millis();
+        self.last_election = now + rng.gen_range(0..300);
+        self.voted_for = None;
+        info!("reset election now {} last {}", now, self.last_election);
     }
 }
 }
