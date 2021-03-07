@@ -135,6 +135,7 @@ impl Server {
                 raft_state.set_who(RaftWho::Follower);
                 raft_state.set_term(request.term);
             }
+            response.term = raft_state.get_term();
             match &raft_state.get_voted_for() {
                 Some(node_id) =>  {
                     if request.node_id == *node_id {
@@ -169,15 +170,16 @@ impl Server {
         info!("append from {}", request.node_id);
 
         let mut raft_state = self.raft_state.write().await;
-        response.term = raft_state.get_term();
         if request.term > raft_state.get_term() {
             raft_state.set_who(RaftWho::Follower);
             raft_state.set_term(request.term);
+            response.term = raft_state.get_term();
         } else if request.term < raft_state.get_term() {
             error!("unexpected term {} vs {}", request.term, raft_state.get_term());
             return Err(CommonError::new(format!("unexpected term")));
         } else {
             raft_state.reset_election();
+            response.term = raft_state.get_term();
         }
         Ok(response)
     }
@@ -310,7 +312,7 @@ impl Server {
                         raft_state.set_term(resp.term);
                         raft_state.set_who(RaftWho::Follower);
                     } else {
-                        if resp.vote_granted {
+                        if resp.vote_granted && resp.term == current_term {
                             info!("vote from {} granted for {}", resp.node_id, self.config.node_id);
                             votes+= 1;
                         }
