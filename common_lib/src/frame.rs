@@ -291,28 +291,52 @@ impl VoteResponse {
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub struct AppendRequest {
+pub struct AppendLogRequest {
     pub cluster_id: String,
     pub node_id: String,
     pub term: u64
 }
 
-impl AppendRequest {
+impl AppendLogRequest {
     pub fn new() -> Self {
-        AppendRequest{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
+        AppendLogRequest{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
     }
 }
 
 #[derive(Serialize, Deserialize, PartialEq, Debug)]
-pub struct AppendResponse {
+pub struct AppendLogResponse {
     pub cluster_id: String,
     pub node_id: String,
     pub term: u64
 }
 
-impl AppendResponse {
+impl AppendLogResponse {
     pub fn new() -> Self {
-        AppendResponse{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
+        AppendLogResponse{cluster_id: "".to_string(), node_id: "".to_string(), term: 0}
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct InsertKeyRequest {
+    pub key: String,
+    pub value: String
+}
+
+impl InsertKeyRequest {
+    pub fn new(key: &str, value: &str) -> Self {
+        InsertKeyRequest{key: key.to_string(), value: value.to_string()}
+    }
+}
+
+#[derive(Serialize, Deserialize, PartialEq, Debug)]
+pub struct InsertKeyResponse {
+    pub redirect: bool,
+    pub redirect_address: String
+}
+
+impl InsertKeyResponse {
+    pub fn new() -> Self {
+        InsertKeyResponse{redirect: false, redirect_address: "".to_string()}
     }
 }
 

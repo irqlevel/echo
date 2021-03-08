@@ -64,13 +64,17 @@ pub struct RaftState {
 
 
     who: RaftWho,
-    pub last_election: i64
+    pub last_election: i64,
+    pub last_leader: RaftNodeId,
+    pub key_value_storage: HashMap<String, String>
 }
 
 impl RaftState {
     pub fn new() -> Self {
         Self{term: 0, voted_for: None, log: Vec::new(), commit_index:0, last_applied: 0,
-            next_index: HashMap::new(), match_index: HashMap::new(), who: RaftWho::Follower, last_election: Utc::now().timestamp_millis()}
+            next_index: HashMap::new(), match_index: HashMap::new(), who: RaftWho::Follower,
+            last_election: Utc::now().timestamp_millis(), last_leader: "".to_string(),
+            key_value_storage: HashMap::new()}
     }
 
     pub async fn to_file(&self, file_path: &str) -> Result<(), CommonError> {

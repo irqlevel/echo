@@ -6,7 +6,7 @@ extern crate common_lib;
 use tokio::net::TcpListener;
 
 use common_lib::error::error::CommonError;
-use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, VoteRequest, VoteResponse, AppendRequest, AppendResponse};
+use common_lib::frame::frame::{Request, Response, EchoRequest, EchoResponse, VoteRequest, VoteResponse, AppendLogRequest, AppendLogResponse, InsertKeyRequest, InsertKeyResponse};
 
 use std::sync::Arc;
 use log::{error, info};
@@ -153,7 +153,7 @@ impl Server {
         Ok(response)
     }
 
-    async fn append_handler(&self, request: &AppendRequest) -> Result<AppendResponse, CommonError> {
+    async fn append_log_handler(&self, request: &AppendLogRequest) -> Result<AppendLogResponse, CommonError> {
         if self.config.cluster_id != request.cluster_id {
             error!("unexpected cluster_id {} vs {}", request.cluster_id, self.config.cluster_id);
             return Err(CommonError::new(format!("unexpected cluster id")));
@@ -163,23 +163,61 @@ impl Server {
             return Err(CommonError::new(format!("unexpected cluster node_id")));
         }
 
-        let mut response = AppendResponse::new();
+        let mut response = AppendLogResponse::new();
         response.cluster_id = self.config.cluster_id.clone();
         response.node_id = self.config.node_id.clone();
 
         info!("append from {}", request.node_id);
 
         let mut raft_state = self.raft_state.write().await;
-        if request.term > raft_state.get_term() {
+        if request.term >= raft_state.get_term() {
+            raft_state.last_leader = request.node_id.clone();
             raft_state.set_who(RaftWho::Follower);
             raft_state.set_term(request.term);
             response.term = raft_state.get_term();
-        } else if request.term < raft_state.get_term() {
+        } else {
             error!("unexpected term {} vs {}", request.term, raft_state.get_term());
             return Err(CommonError::new(format!("unexpected term")));
-        } else {
-            raft_state.reset_election();
-            response.term = raft_state.get_term();
+        }
+        Ok(response)
+    }
+
+    async fn insert_key_handler(&self, request: &InsertKeyRequest) -> Result<InsertKeyResponse, CommonError> {
+        let mut response = InsertKeyResponse::new();
+
+        {
+            let raft_state = self.raft_state.read().await;
+            if raft_state.get_who() != RaftWho::Leader {
+                response.redirect = true;
+                match self.neigh_map.get(&raft_state.last_leader) {
+                    Some(neigh) => {
+                        response.redirect_address = neigh.address.clone();
+                    }
+                    None => {
+                        return Err(CommonError::new(format!("can't find leader")));
+                    }
+                }
+                return Ok(response);
+            }
+        }
+
+        {
+            let mut raft_state = self.raft_state.write().await;
+            if raft_state.get_who() != RaftWho::Leader {
+                response.redirect = true;
+                match self.neigh_map.get(&raft_state.last_leader) {
+                    Some(neigh) => {
+                        response.redirect_address = neigh.address.clone();
+                    }
+                    None => {
+                        return Err(CommonError::new(format!("can't find leader")));
+                    }
+                }
+                return Ok(response);
+            }
+            raft_state.key_value_storage.insert(request.key.clone(), request.value.clone());
+            let raft_state_file_path = self.config.get_sub_storage_path(&Server::RAFT_STATE_FILE_NAME)?;
+            raft_state.to_file(&raft_state_file_path).await?;
         }
         Ok(response)
     }
@@ -230,8 +268,13 @@ impl Server {
                 response.body = Server::serialize_response(&resp)?;
             }
             "/append" => {
-                let req: AppendRequest = Server::deserialize_request(&request.body)?;
-                let resp = self.append_handler(&req).await?;
+                let req: AppendLogRequest = Server::deserialize_request(&request.body)?;
+                let resp = self.append_log_handler(&req).await?;
+                response.body = Server::serialize_response(&resp)?;
+            }
+            "/insert-key" => {
+                let req: InsertKeyRequest = Server::deserialize_request(&request.body)?;
+                let resp = self.insert_key_handler(&req).await?;
                 response.body = Server::serialize_response(&resp)?;
             }
             _ => {
@@ -328,13 +371,13 @@ impl Server {
             RaftWho::Leader => {
                 for neigh in self.get_neighs() {
 
-                    let mut req = AppendRequest::new();
+                    let mut req = AppendLogRequest::new();
 
                     req.cluster_id = self.config.cluster_id.clone();
                     req.node_id = self.config.node_id.clone();
                     req.term = current_term;
 
-                    let resp: AppendResponse = match neigh.send("/append", &req).await {
+                    let resp: AppendLogResponse = match neigh.send("/append", &req).await {
                         Ok(v) => v,
                         Err(e) => {
                             error!("append request failure {}", e);
